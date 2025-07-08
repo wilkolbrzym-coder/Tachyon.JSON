@@ -96,7 +96,7 @@ You can easily integrate the library into your CMake project using `FetchContent
 include(FetchContent)
 FetchContent_Declare(
   tachyon_json
-  GIT_REPOSITORY https://github.com/YOUR_USERNAME/Tachyon.JSON.git
+  GIT_REPOSITORY https://github.com/Maciej0programista/Tachion.JSON/tree/main
   GIT_TAG        main # Or a specific release tag like v2.0.0-BETA
 )
 FetchContent_MakeAvailable(tachyon_json)
