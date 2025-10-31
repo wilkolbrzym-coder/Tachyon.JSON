@@ -1,21 +1,29 @@
-# Tachyon.JSON <sub>v3.0</sub>
+# Tachyon.JSON <sub>v4.0</sub>
 
-![Language](https://img.shields.io/badge/language-C++20-blue.svg)
-![Standard](https://img.shields.io/badge/standard-C++20-blue)
+![Language](https://img.shields.io/badge/language-C++23-blue.svg)
+![Standard](https://img.shields.io/badge/standard-C++23-blue)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-[![Version](https://img.shields.io/badge/version-3.0.0--FINAL-brightgreen.svg)](https://github.com/YOUR_USERNAME/Tachyon.JSON)
+[![Version](https://img.shields.io/badge/version-4.0.0-brightgreen.svg)](https://github.com/YOUR_USERNAME/Tachyon.JSON)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/YOUR_USERNAME/Tachyon.JSON/actions)
 
-**Tachyon.JSON** is a modern, fast, and hyper-customizable single-header C++20 library for working with JSON. It is designed from the ground up for maximum flexibility, performance, and API elegance, making it an ideal choice for high-performance applications, game development, and embedded systems where fine-grained control is paramount.
+**Tachyon.JSON** is a modern, fast, and hyper-customizable single-header C++23 library for working with JSON. It is designed from the ground up for maximum flexibility, performance, and API elegance, making it an ideal choice for high-performance applications, game development, and embedded systems where fine-grained control is paramount.
 
 Tachyon.JSON is not just another JSON library; it's a testament to modern C++ design principles, aiming to provide a highly performant, type-safe, and incredibly customizable framework for JSON manipulation that adapts to the developer's specific needs rather than dictating them.
+
+## V4 Turbo Introduction
+
+Version 4.0, "Turbo," marks a significant leap forward, solidifying Tachyon.JSON's position as a top-tier C++ JSON library. The V4 release is built on three core promises:
+
+*   **Fastest C++ JSON Library:** Through aggressive optimizations like `std::from_chars` for numeric parsing, a zero-copy strategy, and the promotion of `UnorderedJson` as the "Turbo Mode," V4 is engineered to be the fastest on the market.
+*   **Full C++23 Compliance:** The library is fully compliant with the C++23 standard, ensuring it compiles cleanly and leverages the latest language features for maximum performance and stability.
+*   **Zero-Header Modification Customization:** The deep integration of the `Traits` system into all core components (Parser, Serializer) allows for unparalleled customization of allocators, container types, and numeric types without ever needing to modify the `Tachyon.hpp` header.
 
 ## Table of Contents
 
 - [Philosophy](#philosophy)
 - [Key Features](#key-features)
 - [Why Tachyon.JSON?](#why-tachyonjson)
-- [Comparison with `nlohmann/json`](#comparison-with-nlohmannjson)
+- [Comparison with `nlohmann/json`](#comparison-withnlohmannjson)
 - [Quick Start](#quick-start)
   - [Installation](#installation)
   - [CMake Integration](#cmake-integration)
@@ -27,12 +35,17 @@ Tachyon.JSON is not just another JSON library; it's a testament to modern C++ de
   - [Iteration](#iteration)
   - [Error Handling](#error-handling)
 - [User-Defined Types (UDTs)](#user-defined-types-udts)
+- [New V4 API](#new-v4-api)
+  - [JSON Merge Patch (RFC 7396)](#json-merge-patch-rfc-7396)
+  - [Enhanced Array Construction](#enhanced-array-construction)
+  - [Advanced Array Access](#advanced-array-access)
 - [Advanced Features](#advanced-features)
   - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
   - [User-Defined Literals](#user-defined-literals)
 - [The `Traits` System: Ultimate Customization](#the-traits-system-ultimate-customization)
   - [Using `UnorderedJson` for Performance](#using-unorderedjson-for-performance)
   - [Defining Your Own Custom `Traits`](#defining-your-own-custom-traits)
+- [Performance Promise](#performance-promise)
 - [API Reference (Overview)](#api-reference-overview)
 - [License](#license)
 - [Contributing](#contributing)
@@ -48,7 +61,7 @@ The core philosophy of Tachyon.JSON is to provide developers with **uncompromisi
 ## Key Features
 
 *   **Header-Only:** Just include `Tachyon.hpp` in your project. No building, no linking, minimal dependencies.
-*   **Modern C++20 Design:** Fully leverages C++20 features for compile-time safety, efficiency, and an ergonomic API.
+*   **Modern C++23 Design:** Fully leverages C++23 features for compile-time safety, efficiency, and an ergonomic API.
 *   **High-Performance Parser:**
     *   **Non-recursive, State-Machine-Based:** Efficiently handles deeply nested JSON structures, preventing stack overflows.
     *   **`std::from_chars` Powered:** Leverages `std::from_chars` for lightning-fast, locale-independent numeric parsing (where available).
@@ -66,7 +79,7 @@ The core philosophy of Tachyon.JSON is to provide developers with **uncompromisi
 
 ## Why Tachyon.JSON?
 
-Tachyon.JSON offers a unique blend of ease-of-use (intuitive API, header-only) and powerful, low-level control, all built upon modern C++20 idioms. Its `Traits` system provides unparalleled flexibility to tailor the internal data structures and allocators to your project's specific performance, memory, and ordering requirements. This makes it particularly well-suited for high-performance applications, game engines, or scenarios where every byte and cycle counts, providing a level of customization often missing in other JSON libraries.
+Tachyon.JSON offers a unique blend of ease-of-use (intuitive API, header-only) and powerful, low-level control, all built upon modern C++23 idioms. Its `Traits` system provides unparalleled flexibility to tailor the internal data structures and allocators to your project's specific performance, memory, and ordering requirements. This makes it particularly well-suited for high-performance applications, game engines, or scenarios where every byte and cycle counts, providing a level of customization often missing in other JSON libraries.
 
 ## Comparison with `nlohmann/json`
 
@@ -114,7 +127,7 @@ include(FetchContent)
 FetchContent_Declare(
   tachyon_json
   GIT_REPOSITORY https://github.com/Maciej0programista/Tachion.JSON/
-  GIT_TAG        main # Or a specific release tag like v3.0.0-FINAL
+  GIT_TAG        main # Or a specific release tag like v4.0.0
 )
 FetchContent_MakeAvailable(tachyon_json)
 
@@ -139,9 +152,9 @@ int main() {
         {"type", "library"},
         {"awesome", true},
         {"version", {
-            {"major", 3},
+            {"major", 4},
             {"minor", 0},
-            {"status", "FINAL"}
+            {"status", "Turbo"}
         }},
         {"features", Json::Array{"traits", "json_pointer", "exceptions", "performance"}}
     };
@@ -171,7 +184,7 @@ int main() {
         {
             "product": "Tachyon Library", // Single-line comment
             "price": 99.99,
-            "is_beta": true, /* Multi-line comment */
+            "is_beta": false, /* Multi-line comment */
             "tags": ["cpp", "json", ], // Trailing comma
             "release_date": null
         }
@@ -461,6 +474,93 @@ int main() {
 }
 ```
 
+## New V4 API
+
+### JSON Merge Patch (RFC 7396)
+
+V4 introduces the `merge_patch` function, which allows you to apply a JSON Merge Patch (RFC 7396) to a JSON object.
+
+```cpp
+#include "Tachyon.hpp"
+#include <iostream>
+
+using Json = Tachyon::Json;
+
+int main() {
+    Json target = {
+        {"a", "b"},
+        {"c", {
+            {"d", "e"},
+            {"f", "g"}
+        }}
+    };
+
+    Json patch = {
+        {"a", "z"},
+        {"c", {
+            {"f", Json::Null()},
+            {"h", "i"}
+        }}
+    };
+
+    target.merge_patch(patch);
+
+    std::cout << target.dump(4) << std::endl;
+    // {
+    //     "a": "z",
+    //     "c": {
+    //         "d": "e",
+    //         "h": "i"
+    //     }
+    // }
+}
+```
+
+### Enhanced Array Construction
+
+The new `push_back_default` function simplifies the process of adding a new, default-constructed element to an array.
+
+```cpp
+#include "Tachyon.hpp"
+#include <iostream>
+
+using Json = Tachyon::Json;
+
+int main() {
+    Json arr = {1, 2, 3};
+
+    // Add a new null element to the end of the array
+    arr.push_back_default();
+
+    std::cout << arr.dump() << std::endl; // [1, 2, 3, null]
+
+    // Add a new element and immediately modify it
+    arr.push_back_default() = "new value";
+
+    std::cout << arr.dump() << std::endl; // [1, 2, 3, null, "new value"]
+}
+```
+
+### Advanced Array Access
+
+The array index operator (`operator[]`) has been enhanced to automatically resize the array with `null` values if an out-of-bounds index is accessed.
+
+```cpp
+#include "Tachyon.hpp"
+#include <iostream>
+
+using Json = Tachyon::Json;
+
+int main() {
+    Json arr;
+
+    // Accessing an out-of-bounds index will resize the array
+    arr[2] = "hello";
+
+    std::cout << arr.dump() << std::endl; // [null, null, "hello"]
+}
+```
+
 ## Advanced Features
 
 ### JSON Pointer (RFC 6901)
@@ -614,6 +714,14 @@ int main() {
 }
 ```
 
+## Performance Promise
+
+Tachyon.JSON V4 is engineered for speed. The following features contribute to its high performance:
+
+*   **`std::from_chars`:** By using `std::from_chars` for numeric parsing, the library avoids the overhead of locales and streams, resulting in the fastest possible conversion from a string to a number.
+*   **Zero-Copy:** The parser uses `std::string_view` to avoid creating intermediate `std::string` objects for numeric and string parsing, reducing memory allocations and improving performance.
+*   **Unordered Maps:** The `UnorderedJson` alias uses `std::unordered_map` for JSON objects, which provides faster key lookups than `std::map`.
+
 ## API Reference (Overview)
 
 A brief overview of the `Tachyon::BasicJson` API.
@@ -632,6 +740,8 @@ A brief overview of the `Tachyon::BasicJson` API.
 | `j.size()`                                  | Returns the size of an object, array, or string.                            |
 | `j.empty()`                                 | Checks if an object, array, or string is empty, or if the value is null.    |
 | `j.push_back(val)`                          | Appends a value to a JSON array.                                            |
+| `j.push_back_default()`                     | Appends a default-constructed `Json` object to an array.                    |
+| `j.merge_patch(patch)`                      | Applies a JSON Merge Patch (RFC 7396) to the `Json` object.                 |
 
 ## License
 

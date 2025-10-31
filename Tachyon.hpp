@@ -241,9 +241,17 @@ namespace Tachyon {
         // Operators
         // ---------------------------------------------------------------------
         BasicJson& operator[](size_t index) {
-            if (is_null()) { m_data = Array(); }
-            if (!is_array()) { throw JsonException("Not an array"); }
-            auto& arr = get_ref<Array>(); if (index >= arr.size()) { arr.resize(index + 1); } return arr[index];
+            if (is_null()) {
+                m_data = Array();
+            }
+            if (!is_array()) {
+                throw JsonException("Not an array");
+            }
+            auto& arr = get_ref<Array>();
+            if (index >= arr.size()) {
+                arr.resize(index + 1);
+            }
+            return arr[index];
         }
         BasicJson& operator[](int index) {
             if (index < 0) { throw JsonException("Negative index not supported"); } return operator[](static_cast<size_t>(index));
@@ -264,6 +272,17 @@ namespace Tachyon {
             if (is_null()) { m_data = Array(); }
             if (!is_array()) { throw JsonException("Not an array"); } get_ref<Array>().push_back(val);
         }
+
+        BasicJson& push_back_default() {
+            if (is_null()) {
+                m_data = Array();
+            }
+            if (!is_array()) {
+                throw JsonException("Not an array");
+            }
+            get_ref<Array>().emplace_back();
+            return get_ref<Array>().back();
+        }
         // ---------------------------------------------------------------------
         // Serialization & Deserialization (Declared here, implemented externally)
         // ---------------------------------------------------------------------
@@ -271,6 +290,27 @@ namespace Tachyon {
         std::string dump(const DumpOptions& options = {}) const;
         std::string dump(int indent) const;
         const JsonVariant& variant() const { return m_data; }
+        // ---------------------------------------------------------------------
+        // New V4 Functionality
+        // ---------------------------------------------------------------------
+        void merge_patch(const BasicJson& patch) {
+            if (!patch.is_object()) {
+                *this = patch;
+                return;
+            }
+            if (!is_object()) {
+                *this = patch;
+                return;
+            }
+            auto& this_obj = get_ref<Object>();
+            for (const auto& [key, value] : patch.get_ref<Object>()) {
+                if (value.is_null()) {
+                    this_obj.erase(key);
+                } else {
+                    this_obj[key].merge_patch(value);
+                }
+            }
+        }
     };
     using Json = BasicJson<DefaultTraits<std::allocator<char>>>;
     template<class Allocator>
@@ -408,13 +448,14 @@ namespace internal {
     /**
      * @brief Internal class responsible for parsing JSON strings into BasicJson objects.
      */
+    template<class TargetJsonType>
     class Parser {
     public:
         Parser(std::string_view input, const ParseOptions& options)
             : m_input(input), m_opts(options) {}
-        Json parse_json() {
+        TargetJsonType parse_json() {
             skip_whitespace_and_comments();
-            Json result = parse_value();
+            TargetJsonType result = parse_value();
             skip_whitespace_and_comments();
             if (m_pos < m_input.length()) {
                 throw_parse_error("Unexpected characters after JSON root element.");
@@ -473,12 +514,12 @@ namespace internal {
                 break;
             }
         }
-        Json parse_value() {
+        TargetJsonType parse_value() {
             if (++m_depth > m_opts.max_depth) {
                 throw_parse_error("Maximum parse depth exceeded. JSON structure is too deeply nested.");
             }
             skip_whitespace_and_comments();
-            Json result;
+            TargetJsonType result;
             char current_char = peek();
             switch (current_char) {
                 case '{': result = parse_object(); break;
@@ -498,76 +539,86 @@ namespace internal {
             return result;
         }
         template<typename T>
-        Json parse_literal(const char* literal, T val) {
+        TargetJsonType parse_literal(const char* literal, T val) {
             size_t literal_len = std::strlen(literal);
             if (m_pos + literal_len > m_input.length() || m_input.substr(m_pos, literal_len) != literal) {
                 throw_parse_error(std::string("Expected literal '") + literal + "'");
             }
             for(size_t i=0; i < literal_len; ++i) { advance(); }
-            return Json(val);
+            return TargetJsonType(val);
         }
-        Json parse_number() {
-            size_t start_pos = m_pos;
-            bool is_float = false;
-            if (peek() == '-') { advance(); }
-            if (!isdigit(static_cast<unsigned char>(peek()))) { throw_parse_error("Invalid number format: expected digit."); }
-            if (peek() == '0' && m_pos + 1 < m_input.length() && isdigit(static_cast<unsigned char>(m_input[m_pos + 1]))) {
-                throw_parse_error("Invalid number format: leading zeros are not allowed.");
-            }
-            while (isdigit(static_cast<unsigned char>(peek()))) { advance(); }
-            if (peek() == '.') {
-                is_float = true;
-                advance();
-                if (!isdigit(static_cast<unsigned char>(peek()))) { throw_parse_error("Invalid number format: expected digit after decimal point."); }
-                while (isdigit(static_cast<unsigned char>(peek()))) { advance(); }
-            }
-            if (peek() == 'e' || peek() == 'E') {
-                is_float = true;
-                advance();
-                if (peek() == '+' || peek() == '-') { advance(); }
-                if (!isdigit(static_cast<unsigned char>(peek()))) { throw_parse_error("Invalid number format: expected digit in exponent."); }
-                while (isdigit(static_cast<unsigned char>(peek()))) { advance(); }
-            }
-            std::string_view num_sv(m_input.data() + start_pos, m_pos - start_pos);
-            if (is_float) {
-                Json::Float val;
-                #if TACHYON_HAS_FLOAT_FROM_CHARS
-                    auto res = std::from_chars(num_sv.data(), num_sv.data() + num_sv.size(), val);
-                    if (res.ec != std::errc() || res.ptr != num_sv.data() + num_sv.size()) { throw_parse_error("Invalid float format or range error: " + std::string(num_sv)); }
-                #else
-                    try { val = static_cast<Json::Float>(std::stod(std::string(num_sv))); }
-                    catch (const std::out_of_range&) { throw_parse_error("Float number out of range: " + std::string(num_sv)); }
-                    catch (const std::invalid_argument&) { throw_parse_error("Invalid float format (stod fallback): " + std::string(num_sv)); }
-                #endif
-                return Json(val);
-            } else {
-                Json::Integer val;
-                auto res = std::from_chars(num_sv.data(), num_sv.data() + num_sv.size(), val);
-                if (res.ec != std::errc() || res.ptr != num_sv.data() + num_sv.size()) {
-                    Json::Float f_val;
-                    #if TACHYON_HAS_FLOAT_FROM_CHARS
-                        auto res_f = std::from_chars(num_sv.data(), num_sv.data() + num_sv.size(), f_val);
-                        if (res_f.ec != std::errc() || res_f.ptr != num_sv.data() + num_sv.size()) { throw_parse_error("Invalid number format: " + std::string(num_sv)); }
-                    #else
-                        try { f_val = static_cast<Json::Float>(std::stod(std::string(num_sv))); }
-                        catch (const std::out_of_range&) { throw_parse_error("Number out of range: " + std::string(num_sv)); }
-                        catch (const std::invalid_argument&) { throw_parse_error("Invalid number format: " + std::string(num_sv)); }
-                    #endif
-                    return Json(f_val);
-                }
-                return Json(val);
-            }
+        TargetJsonType parse_number() {
+    size_t start_pos = m_pos;
+    bool is_float = false;
+
+    if (peek() == '-') { advance(); }
+
+    if (!isdigit(static_cast<unsigned char>(peek()))) {
+        throw_parse_error("Invalid number format: expected digit.");
+    }
+
+    if (peek() == '0' && m_pos + 1 < m_input.length() && isdigit(static_cast<unsigned char>(m_input[m_pos + 1]))) {
+        throw_parse_error("Invalid number format: leading zeros are not allowed.");
+    }
+
+    while (isdigit(static_cast<unsigned char>(peek()))) { advance(); }
+
+    if (peek() == '.') {
+        is_float = true;
+        advance();
+        if (!isdigit(static_cast<unsigned char>(peek()))) {
+            throw_parse_error("Invalid number format: expected digit after decimal point.");
         }
-        void append_utf8(Json::String& s, uint32_t cp) {
+        while (isdigit(static_cast<unsigned char>(peek()))) { advance(); }
+    }
+
+    if (peek() == 'e' || peek() == 'E') {
+        is_float = true;
+        advance();
+        if (peek() == '+' || peek() == '-') { advance(); }
+        if (!isdigit(static_cast<unsigned char>(peek()))) {
+            throw_parse_error("Invalid number format: expected digit in exponent.");
+        }
+        while (isdigit(static_cast<unsigned char>(peek()))) { advance(); }
+    }
+
+    std::string_view num_sv(m_input.data() + start_pos, m_pos - start_pos);
+
+    if (!is_float) {
+        typename TargetJsonType::Integer val;
+        auto res = std::from_chars(num_sv.data(), num_sv.data() + num_sv.size(), val);
+        if (res.ec == std::errc() && res.ptr == num_sv.data() + num_sv.size()) {
+            return TargetJsonType(val);
+        }
+    }
+
+    typename TargetJsonType::Float f_val;
+    #if TACHYON_HAS_FLOAT_FROM_CHARS
+        auto res_f = std::from_chars(num_sv.data(), num_sv.data() + num_sv.size(), f_val);
+        if (res_f.ec != std::errc() || res_f.ptr != num_sv.data() + num_sv.size()) {
+            throw_parse_error("Invalid number format: " + std::string(num_sv));
+        }
+    #else
+        try {
+            f_val = static_cast<typename TargetJsonType::Float>(std::stod(std::string(num_sv)));
+        } catch (const std::out_of_range&) {
+            throw_parse_error("Number out of range: " + std::string(num_sv));
+        } catch (const std::invalid_argument&) {
+            throw_parse_error("Invalid number format: " + std::string(num_sv));
+        }
+    #endif
+    return TargetJsonType(f_val);
+}
+        void append_utf8(typename TargetJsonType::String& s, uint32_t cp) {
             if (cp <= 0x7F) { s += static_cast<char>(cp); }
             else if (cp <= 0x7FF) { s += static_cast<char>(0xC0 | (cp >> 6)); s += static_cast<char>(0x80 | (cp & 0x3F)); }
             else if (cp <= 0xFFFF) { s += static_cast<char>(0xE0 | (cp >> 12)); s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); s += static_cast<char>(0x80 | (cp & 0x3F)); }
             else if (cp <= 0x10FFFF) { s += static_cast<char>(0xF0 | (cp >> 18)); s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); s += static_cast<char>(0x80 | (cp & 0x3F)); }
             else { throw_parse_error("Invalid Unicode code point detected."); }
         }
-        Json parse_string() {
+        TargetJsonType parse_string() {
             expect('"');
-            Json::String str; str.reserve(32);
+            typename TargetJsonType::String str; str.reserve(32);
             while (peek() != '"') {
                 char c = advance(); if (c == '\0') { throw_parse_error("Unterminated string"); }
                 if (c == '\\') {
@@ -602,13 +653,13 @@ namespace internal {
                 } else if (static_cast<unsigned char>(c) < 0x20) { throw_parse_error("Unescaped control character in string."); }
                 else { str += c; }
             }
-            expect('"'); return Json(str);
+            expect('"'); return TargetJsonType(str);
         }
-        Json parse_array() {
+        TargetJsonType parse_array() {
             expect('[');
-            Json::Array arr;
+            typename TargetJsonType::Array arr;
             skip_whitespace_and_comments();
-            if (peek() == ']') { advance(); return Json(std::move(arr)); }
+            if (peek() == ']') { advance(); return TargetJsonType(std::move(arr)); }
             while (true) {
                 arr.push_back(parse_value());
                 skip_whitespace_and_comments();
@@ -620,22 +671,22 @@ namespace internal {
                     break;
                 }
             }
-            return Json(std::move(arr));
+            return TargetJsonType(std::move(arr));
         }
         // FIX: Re-evaluated logic for parsing empty keys and ensuring type is correct
         // The issue was likely due to unexpected behavior around empty string literal conversion to bool.
         // Ensuring the key is explicitly stored as a string.
-        Json parse_object() {
+        TargetJsonType parse_object() {
             expect('{');
-            Json::Object obj;
+            typename TargetJsonType::Object obj;
             skip_whitespace_and_comments();
-            if (peek() == '}') { advance(); return Json(std::move(obj)); }
+            if (peek() == '}') { advance(); return TargetJsonType(std::move(obj)); }
             while (true) {
                 if (peek() != '"') { throw_parse_error("Expected string key for object"); }
                 // Parse the key. This should always result in a Json::String.
-                Json key_json_val = parse_string(); // Parse the string value for the key
+                TargetJsonType key_json_val = parse_string(); // Parse the string value for the key
                 // Use get_ref<Json::String>() to safely retrieve the string value
-                Json::String key = std::move(key_json_val.get_ref<Json::String>());
+                typename TargetJsonType::String key = std::move(key_json_val.template get_ref<typename TargetJsonType::String>());
                 expect(':');
                 obj.emplace(std::move(key), parse_value());
                 skip_whitespace_and_comments();
@@ -647,7 +698,7 @@ namespace internal {
                     break;
                 }
             }
-            return Json(std::move(obj));
+            return TargetJsonType(std::move(obj));
         }
     };
 } // namespace internal
@@ -888,8 +939,8 @@ namespace Tachyon {
                 // Using std::string_view for efficient handling of the literal.
                 return Json::parse(std::string_view(s, n));
             }
-        } // namespace json_literals
-    } // namespace literals
+} // namespace json_literals
+} // namespace literals
 } // namespace Tachyon
 
 // Core library components
@@ -905,18 +956,14 @@ namespace Tachyon {
     // but defined outside the class body (e.g., after internal parser/serializer/pointer are defined).
     template<class Traits>
     inline BasicJson<Traits> BasicJson<Traits>::parse(std::string_view s, const ParseOptions& o) {
-        // The internal Parser is currently designed to return Tachyon::Json (BasicJson<DefaultTraits>).
-        // If a truly traits-agnostic parse were needed for BasicJson<SomeOtherTraits>,
-        // the Parser class itself would need to be templated or adapted.
-        // For now, BasicJson<Traits>::parse always returns a Json (DefaultTraits) object.
-        return internal::Parser(s, o).parse_json();
+        internal::Parser<BasicJson<Traits>> parser(s, o);
+        return parser.parse_json();
     }
     template<class Traits>
     inline std::string BasicJson<Traits>::dump(const DumpOptions& o) const {
         std::ostringstream ss;
-        // FIX: Pass the specific BasicJson type to the Serializer template
         internal::Serializer<BasicJson<Traits>> ss_serializer(ss, o);
-        ss_serializer.serialize(*this); // Call the serialize method of the specific Serializer instance
+        ss_serializer.serialize(*this);
         return ss.str();
     }
     template<class Traits>
