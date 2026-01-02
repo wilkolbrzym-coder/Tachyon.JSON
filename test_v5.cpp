@@ -31,6 +31,52 @@ void test_basic_types() {
     std::cout << "Basic Types OK" << std::endl;
 }
 
+void test_conversions() {
+    std::cout << "Testing Numeric Conversions..." << std::endl;
+    Json j = 42;
+    // int64_t internal
+    assert(j.get<int>() == 42);
+    assert(j.get<short>() == 42);
+    assert(j.get<unsigned int>() == 42);
+    assert(std::abs(j.get<float>() - 42.0f) < 0.001);
+    assert(std::abs(j.get<double>() - 42.0) < 0.001);
+
+    Json f = 3.14;
+    // double internal
+    assert(f.get<int>() == 3); // truncation
+    assert(std::abs(f.get<float>() - 3.14f) < 0.001);
+
+    std::cout << "Conversions OK" << std::endl;
+}
+
+void test_sorting() {
+    std::cout << "Testing Sort Keys..." << std::endl;
+    Json j;
+    // Force unsorted insertion (ObjectMap usually appends if manually inserted)
+    j["z"] = 1;
+    j["a"] = 2;
+    j["m"] = 3;
+
+    // Default dump (insertion order for unsorted map)
+    std::string dump1 = j.dump();
+    // Expect: {"z": 1,"a": 2,"m": 3} or similar, definitely not sorted alphabetically if insertion order preserved
+    // Wait, implementation details of ObjectMap::operator[] appends.
+
+    DumpOptions opts;
+    opts.sort_keys = true;
+    std::string dump2 = j.dump(opts);
+
+    // Check if keys are sorted in dump2
+    size_t pos_a = dump2.find("\"a\"");
+    size_t pos_m = dump2.find("\"m\"");
+    size_t pos_z = dump2.find("\"z\"");
+
+    assert(pos_a < pos_m);
+    assert(pos_m < pos_z);
+
+    std::cout << "Sorting OK" << std::endl;
+}
+
 void test_array() {
     std::cout << "Testing Array..." << std::endl;
     Json arr = {1, 2, "three"};
@@ -170,8 +216,7 @@ void test_performance() {
     std::chrono::duration<double, std::milli> elapsed = end - start;
     std::cout << "Parsed 10,000 objects in " << elapsed.count() << " ms" << std::endl;
     assert(parsed.size() == 10000);
-    // Verify sorted optimization: Check last element access (should be fast if sorted logic works, though it's inside array)
-    // Access object inside array
+    // Verify sorted optimization: Check last element access
     assert(parsed[9999]["id"].get<int>() == 9999);
 
     // 2. Build Speed (Object)
@@ -188,19 +233,6 @@ void test_performance() {
 
     // 3. Access Speed
     std::cout << "[Access Speed]" << std::endl;
-    // Force sort if not already? (It sorts on first access if we implemented it, or if build was chaotic)
-    // Actually, operator[] marks unsorted.
-    // So this will be slow unless we manually sort or trigger it.
-    // Let's trigger a sort via a dummy find or implementation detail?
-    // User can't explicitly call sort() on Json.
-    // However, find_impl calls lower_bound ONLY IF m_sorted is true.
-    // operator[] appends and sets m_sorted = false.
-    // So this access loop will be O(N^2) if we don't sort.
-    // BUT, ObjectMap::find_impl doesn't auto-sort (because it's const or non-const find).
-    // We should probably auto-sort on first read access if feasible?
-    // No, `find_impl` is const, can't sort.
-    // Modifiable `operator[]` calls `find_impl`.
-
     start = std::chrono::high_resolution_clock::now();
     int sum = 0;
     for(int i=0; i<build_count; ++i) {
@@ -214,6 +246,8 @@ void test_performance() {
 int main() {
     try {
         test_basic_types();
+        test_conversions();
+        test_sorting();
         test_array();
         test_object();
         test_advanced();

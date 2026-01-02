@@ -79,7 +79,7 @@ struct ParseOptions {
 struct DumpOptions {
     int indent = -1; // -1 for compact
     char indent_char = ' ';
-    bool sort_keys = false; // Note: ObjectMap is usually sorted by default for speed
+    bool sort_keys = false;
     bool ascii_only = false;
 };
 
@@ -363,11 +363,6 @@ inline Type Json::type() const noexcept {
 }
 
 template <typename T>
-T Json::get() const {
-    return get_ref<T>(); // Return copy of the reference
-}
-
-template <typename T>
 const T& Json::get_ref() const {
     if constexpr (std::is_same_v<T, bool>) {
         if (is_boolean()) return std::get<boolean_t>(m_data);
@@ -379,11 +374,6 @@ const T& Json::get_ref() const {
         if (is_number_float()) return std::get<number_float_t>(m_data);
         throw JsonException("Type mismatch: expected double");
     } else if constexpr (std::integral<T>) {
-         // Cannot return reference to temporary cast, so get_ref<int> on int64_t is tricky.
-         // We must only support exact types for get_ref, or throw error.
-         // Or we allow get_ref to fail if type is not exact.
-         // For convenience, we assume get_ref is for container access mainly.
-         // For primitives, by-value get<T> is better.
          throw JsonException("get_ref<T> requires exact type match. Use get<T> for conversions.");
     } else if constexpr (std::is_same_v<T, std::string>) {
         if (is_string()) return std::get<string_t>(m_data);
@@ -425,20 +415,34 @@ T& Json::get_ref() {
     }
 }
 
-// Specialization for get<T> where T is a primitive but storage is compatible
-// We need to overload get<T> properly because generic get calls get_ref, which fails for int vs int64_t
-template <>
-inline int Json::get<int>() const {
-    if (is_number_int()) return static_cast<int>(std::get<number_int_t>(m_data));
-    if (is_number_float()) return static_cast<int>(std::get<number_float_t>(m_data));
-    throw JsonException("Type mismatch: expected integer");
-}
-
-template <>
-inline double Json::get<double>() const {
-    if (is_number_float()) return std::get<number_float_t>(m_data);
-    if (is_number_int()) return static_cast<double>(std::get<number_int_t>(m_data));
-    throw JsonException("Type mismatch: expected number");
+// Improved get<T> with implicit conversions for numeric types
+template <typename T>
+T Json::get() const {
+    if constexpr (std::is_same_v<T, bool>) {
+        if (is_boolean()) return std::get<boolean_t>(m_data);
+        throw JsonException("Type mismatch: expected boolean");
+    } else if constexpr (std::integral<T>) {
+        if (is_number_int()) return static_cast<T>(std::get<number_int_t>(m_data));
+        if (is_number_float()) return static_cast<T>(std::get<number_float_t>(m_data));
+        throw JsonException("Type mismatch: expected number");
+    } else if constexpr (std::floating_point<T>) {
+        if (is_number_float()) return static_cast<T>(std::get<number_float_t>(m_data));
+        if (is_number_int()) return static_cast<T>(std::get<number_int_t>(m_data));
+        throw JsonException("Type mismatch: expected number");
+    } else if constexpr (std::is_same_v<T, std::string>) {
+        if (is_string()) return std::get<string_t>(m_data);
+        throw JsonException("Type mismatch: expected string");
+    } else if constexpr (std::is_same_v<T, array_t>) {
+        // Return copy
+        if (is_array()) return std::get<array_t>(m_data);
+        throw JsonException("Type mismatch: expected array");
+    } else if constexpr (std::is_same_v<T, object_t>) {
+        // Return copy
+        if (is_object()) return std::get<object_t>(m_data);
+        throw JsonException("Type mismatch: expected object");
+    } else {
+        throw JsonException("Unsupported type get");
+    }
 }
 
 inline Json& Json::operator[](size_t index) {
@@ -793,17 +797,44 @@ namespace Internal {
                 case Type::Object: {
                     m_out += '{';
                     const auto& obj = j.get_ref<Json::object_t>(); // Zero copy
+
                     if (!obj.empty()) {
                         m_depth++;
-                        size_t i = 0;
-                        for (const auto& [k, v] : obj) {
-                            indent();
-                            dump_string(k);
-                            m_out += ": ";
-                            visit(v);
-                            if (i < obj.size() - 1) m_out += ',';
-                            i++;
+
+                        // Handle sorting options
+                        if (m_opts.sort_keys) {
+                            // Copy pointers to elements for sorting
+                            std::vector<const ObjectMap::Member*> sorted_ptrs;
+                            sorted_ptrs.reserve(obj.size());
+                            for (const auto& member : obj) {
+                                sorted_ptrs.push_back(&member);
+                            }
+                            std::sort(sorted_ptrs.begin(), sorted_ptrs.end(),
+                                [](const auto* a, const auto* b) { return a->first < b->first; });
+
+                            size_t i = 0;
+                            for (const auto* ptr : sorted_ptrs) {
+                                indent();
+                                dump_string(ptr->first);
+                                m_out += ": ";
+                                visit(ptr->second);
+                                if (i < sorted_ptrs.size() - 1) m_out += ',';
+                                i++;
+                            }
+
+                        } else {
+                            // Default order
+                            size_t i = 0;
+                            for (const auto& [k, v] : obj) {
+                                indent();
+                                dump_string(k);
+                                m_out += ": ";
+                                visit(v);
+                                if (i < obj.size() - 1) m_out += ',';
+                                i++;
+                            }
                         }
+
                         m_depth--;
                         indent();
                     }

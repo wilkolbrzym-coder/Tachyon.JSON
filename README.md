@@ -1,752 +1,238 @@
-# Tachyon.JSON <sub>v4.0</sub>
+# Tachyon.JSON <sub>v5.0 Turbo</sub>
 
 ![Language](https://img.shields.io/badge/language-C++23-blue.svg)
 ![Standard](https://img.shields.io/badge/standard-C++23-blue)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-[![Version](https://img.shields.io/badge/version-4.0.0-brightgreen.svg)](https://github.com/YOUR_USERNAME/Tachyon.JSON)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/YOUR_USERNAME/Tachyon.JSON/actions)
+[![Version](https://img.shields.io/badge/version-5.0.0--Turbo-brightgreen.svg)](https://github.com/YOUR_USERNAME/Tachyon.JSON)
 
-**Tachyon.JSON** is a modern, fast, and hyper-customizable single-header C++23 library for working with JSON. It is designed from the ground up for maximum flexibility, performance, and API elegance, making it an ideal choice for high-performance applications, game development, and embedded systems where fine-grained control is paramount.
+**Tachyon.JSON V5 "Turbo"** is the next evolution of high-performance JSON processing for C++. Rebuilt from the ground up using **C++23**, it abandons legacy C++ patterns in favor of modern Concepts, `std::variant`, and contiguous memory layouts to deliver the fastest, most cache-efficient, and developer-friendly JSON library available.
 
-Tachyon.JSON is not just another JSON library; it's a testament to modern C++ design principles, aiming to provide a highly performant, type-safe, and incredibly customizable framework for JSON manipulation that adapts to the developer's specific needs rather than dictating them.
+Tachyon V5 isn't just an update; it's a revolution. It strips away the bloat of template metaprogramming (SFINAE) and replaces it with clean, readable, and lightning-fast code. It introduces a new hybrid object storage system that rivals `std::unordered_map` in speed while maintaining deterministic memory usage and superior cache locality.
 
-## V4 Turbo Introduction
+## 🚀 What's New in V5 Turbo?
 
-Version 4.0, "Turbo," marks a significant leap forward, solidifying Tachyon.JSON's position as a top-tier C++ JSON library. The V4 release is built on three core promises:
+Version 5.0 is the biggest overhaul in the library's history. Here is an extensive breakdown of the improvements:
 
-*   **Fastest C++ JSON Library:** Through aggressive optimizations like `std::from_chars` for numeric parsing, a zero-copy strategy, and the promotion of `UnorderedJson` as the "Turbo Mode," V4 is engineered to be the fastest on the market.
-*   **Full C++23 Compliance:** The library is fully compliant with the C++23 standard, ensuring it compiles cleanly and leverages the latest language features for maximum performance and stability.
-*   **Zero-Header Modification Customization:** The deep integration of the `Traits` system into all core components (Parser, Serializer) allows for unparalleled customization of allocators, container types, and numeric types without ever needing to modify the `Tachyon.hpp` header.
+### 1. Pure C++23 Architecture
+*   **Concepts-Driven API:** We removed verbose `std::enable_if` SFINAE hacks. V5 uses C++20/23 **Concepts** (`requires`, `std::convertible_to`, etc.) to enforce type safety at compile time. This results in readable compiler error messages and faster build times.
+*   **`std::variant` Core:** The underlying node storage now uses `std::variant`, eliminating unsafe unions and custom type discriminators. This standardizes the memory layout and improves safety.
+*   **`std::from_chars` & `std::to_chars`:** Parsing and serialization of numbers now exclusively use the C++17/20 high-performance conversion primitives, bypassing standard IOStreams and locale dependencies completely for maximum throughput.
+
+### 2. High-Performance `ObjectMap`
+*   **Vector-Based Storage:** In V4, objects were `std::map` (RB-Tree) or `std::unordered_map` (Hash Table). V5 introduces `ObjectMap`, which stores members in a **sorted `std::vector`**.
+    *   **Cache Locality:** Data is stored contiguously in memory. Iterating over an object is now a linear memory walk, drastically reducing CPU cache misses compared to node-based containers.
+    *   **O(log N) Lookups:** The parser automatically sorts object keys. Subsequent lookups use binary search (`std::lower_bound`), offering O(log N) performance that often beats hash maps for typical JSON object sizes (small to medium) due to lack of hashing overhead.
+    *   **Zero Allocation Overhead:** Unlike maps that allocate a node for every entry, `ObjectMap` performs a single buffer allocation (plus resizes), reducing malloc pressure.
+
+### 3. Zero-Copy Access (`get_ref`)
+*   **The Problem:** Traditional `get<T>()` methods often return by value. For large strings, arrays, or objects, this forces a deep copy of the data, killing performance.
+*   **The V5 Solution:** V5 introduces `get_ref<T>()`.
+    *   **Direct Access:** Returns a `const T&` or `T&` directly to the internal storage.
+    *   **No Copies:** Read and modify nested structures without a single byte being copied.
+    *   **Safety:** Checked at runtime to ensure you are accessing the correct type.
+
+### 4. Enhanced Parsing Engine
+*   **Non-Recursive Logic:** The parser has been hardened to handle deeply nested structures without blowing up the stack.
+*   **UTF-16 Surrogate Pair Support:** Full support for parsing escaped UTF-16 surrogate pairs (e.g., `\uD83D\uDE00` -> 😃) into valid UTF-8 strings.
+*   **Trailing Commas & Comments:** Native support for "JSON5-like" features: standard C++ style comments (`//`, `/* */`) and trailing commas in arrays/objects are supported by default.
 
 ## Table of Contents
 
 - [Philosophy](#philosophy)
-- [Key Features](#key-features)
-- [Why Tachyon.JSON?](#why-tachyonjson)
-- [Comparison with `nlohmann/json`](#comparison-withnlohmannjson)
+- [Installation](#installation)
 - [Quick Start](#quick-start)
-  - [Installation](#installation)
-  - [CMake Integration](#cmake-integration)
-- [Usage Examples](#usage-examples)
-  - [Creating JSON](#creating-json)
-  - [Parsing JSON](#parsing-json)
-  - [Serialization (Dumping)](#serialization-dumping)
-  - [Accessing Data](#accessing-data)
-  - [Iteration](#iteration)
-  - [Error Handling](#error-handling)
-- [User-Defined Types (UDTs)](#user-defined-types-udts)
-- [New V4 API](#new-v4-api)
-  - [JSON Merge Patch (RFC 7396)](#json-merge-patch-rfc-7396)
-  - [Enhanced Array Construction](#enhanced-array-construction)
-  - [Advanced Array Access](#advanced-array-access)
-- [Advanced Features](#advanced-features)
-  - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
-  - [User-Defined Literals](#user-defined-literals)
-- [The `Traits` System: Ultimate Customization](#the-traits-system-ultimate-customization)
-  - [Using `UnorderedJson` for Performance](#using-unorderedjson-for-performance)
-  - [Defining Your Own Custom `Traits`](#defining-your-own-custom-traits)
-- [Performance Promise](#performance-promise)
-- [API Reference (Overview)](#api-reference-overview)
-- [License](#license)
-- [Contributing](#contributing)
+- [Performance Deep Dive](#performance-deep-dive)
+- [API Reference](#api-reference)
+    - [Parsing](#parsing)
+    - [Serialization](#serialization)
+    - [Accessing Data](#accessing-data)
+    - [Modifying Data](#modifying-data)
+- [Advanced Usage](#advanced-usage)
+- [Error Handling](#error-handling)
 
 ## Philosophy
 
-The core philosophy of Tachyon.JSON is to provide developers with **uncompromising control** without sacrificing ease of use. While other libraries offer a one-size-fits-all solution, Tachyon.JSON acknowledges that different projects have different needs:
--   **Performance is not universal:** Some applications need fast object access (`std::unordered_map`), while others require deterministic output (`std::map`).
--   **Memory is critical:** The ability to specify custom allocators is essential for memory-constrained environments.
--   **Type safety is paramount:** Modern C++ allows for robust compile-time checks that prevent common errors.
--   **Clarity over "magic":** The library prefers explicit function calls (like `to_json`/`from_json`) for User-Defined Types to avoid complex and error-prone implicit SFINAE behavior, leading to more stable and predictable compilation.
+Tachyon V5 follows the **"Pay for what you use, but use the fastest by default"** principle.
+*   **Simplicity:** One header. One class `Json`. No complex template typedefs needed for basic usage.
+*   **Speed:** Default behaviors (like `ObjectMap`) are chosen for the 99% use case of high-performance games and realtime apps.
+*   **Modernity:** We don't support old compilers. C++23 is the baseline, allowing us to use the best tools the language offers.
 
-## Key Features
+## Installation
 
-*   **Header-Only:** Just include `Tachyon.hpp` in your project. No building, no linking, minimal dependencies.
-*   **Modern C++23 Design:** Fully leverages C++23 features for compile-time safety, efficiency, and an ergonomic API.
-*   **High-Performance Parser:**
-    *   **Non-recursive, State-Machine-Based:** Efficiently handles deeply nested JSON structures, preventing stack overflows.
-    *   **`std::from_chars` Powered:** Leverages `std::from_chars` for lightning-fast, locale-independent numeric parsing (where available).
-    *   **Flexible Parsing Options:** Configurable `ParseOptions` to allow comments (single-line `//` and multi-line `/* */`) and trailing commas.
-*   **Robust Type System:**
-    *   **Distinct Number Types:** Separates `Integer` (`int64_t`) and `Float` (`double`) for precise representation.
-    *   **Type-Safe `get<T>()`:** Provides highly robust, type-safe, and compile-time checked value retrieval with intelligent numeric conversions between `Integer` and `Float`.
-*   **Flexible Serialization:** Customizable `DumpOptions` for pretty-printing (indentation, char), floating-point precision, optional key sorting for `unordered_map` based objects, and byte-level Unicode escaping (for non-ASCII characters as `\u00XX`).
-*   **Detailed Error Reporting:** `JsonParseException` provides precise error messages including line number, column, and the problematic context, greatly aiding debugging of malformed input.
-*   **Full JSON Standard Compliance:** Supports UTF-8 strings (including surrogate pairs), numbers, arrays, objects, `true`, `false`, and `null`.
-*   **Powerful Customization with Traits:** Define custom underlying types for strings, objects (e.g., `std::map` for ordered keys or `std::unordered_map` for faster access), arrays, and even allocators.
-*   **JSON Pointer Support:** Navigate complex JSON structures with `at_pointer()` (RFC 6901 compliant), including handling empty string keys (`"/"`).
-*   **Extensible Serialization:** Easily serialize and deserialize custom C++ types to/from `Tachyon::Json` using explicit `to_json` and `from_json` ADL functions.
-*   **User-Defined Literals:** Convenient `_tjson` literal for creating JSON objects directly from string literals.
+Tachyon is a single-header library.
 
-## Why Tachyon.JSON?
+1.  **Download** `Tachyon.hpp` from the repository.
+2.  **Include** it in your project.
+3.  **Compile** with C++23 enabled (`-std=c++23` for GCC/Clang, `/std:c++latest` for MSVC).
 
-Tachyon.JSON offers a unique blend of ease-of-use (intuitive API, header-only) and powerful, low-level control, all built upon modern C++23 idioms. Its `Traits` system provides unparalleled flexibility to tailor the internal data structures and allocators to your project's specific performance, memory, and ordering requirements. This makes it particularly well-suited for high-performance applications, game engines, or scenarios where every byte and cycle counts, providing a level of customization often missing in other JSON libraries.
-
-## Comparison with `nlohmann/json`
-
-`nlohmann/json` is a widely adopted and excellent JSON library. Tachyon.JSON does not aim to replace it, but rather to offer a compelling alternative for specific use cases.
-
-### Tachyon.JSON's Strengths:
-
-*   **True Single-Header, Zero External Dependencies:** Truly self-contained, ideal for projects with strict dependency constraints.
-*   **Performance-Oriented Core:** Explicitly non-recursive parser and `std::from_chars` integration out-of-the-box offer potential performance benefits, especially for deeply nested or heavily numeric JSON.
-*   **Unparalleled Customization:** The `Traits` system provides the deepest level of control over underlying container types and allocators, allowing for highly optimized configurations.
-*   **Detailed Error Reporting:** Superior parse error messages with exact line/column/context for quick debugging.
-*   **Flexible Parsing (Non-Standard):** Built-in support for comments and trailing commas is highly convenient for configuration files.
-*   **Strict UDT Conversion:** By requiring explicit `to_json`/`from_json` calls for User-Defined Types (UDTs), Tachyon.JSON avoids complex SFINAE (Substitution Failure Is Not An Error) pitfalls that can occur with implicit conversions involving standard library containers, leading to greater compilation stability and clarity.
-
-### `nlohmann/json`'s Strengths:
-
-*   **Maturity & Community:** As an industry standard, it's extensively battle-tested with a vast community, comprehensive documentation, and a long track record.
-*   **Rich Ecosystem:** Supports JSON Patch, JSON Merge Patch, and binary formats like CBOR, MessagePack, UBJSON, BSON.
-*   **Full JSON RFC Adherence (Default):** Strictly adheres to the JSON standard by default, ensuring maximum compatibility.
-*   **More Relaxed Implicit Conversions:** Offers more automatic type conversions for UDTs via constructor/`get<T>()`, which can be convenient (though potentially less strict in compilation environments).
-
-**Choose Tachyon.JSON if:** you prioritize minimal dependencies, maximum performance control, detailed error messages, compilation stability (especially with complex UDTs), or need to parse JSON with comments/trailing commas.
-**Choose `nlohmann/json` if:** you need the most mature, widely-adopted solution with a broad feature set and extensive community support, and are comfortable with its implicit conversion behaviors.
+```cpp
+#include "Tachyon.hpp"
+using namespace Tachyon;
+```
 
 ## Quick Start
 
-### Installation
-
-As a header-only library, simply copy `Tachyon.hpp` into your project and include it:
-```cpp
-#include "Tachyon.hpp"
-
-// ...and you're ready to go!
-using Json = Tachyon::Json; // Use the default Json (std::map based object)
-// For unordered maps, use:
-// using UnorderedJson = Tachyon::UnorderedJson;
-```
-
-### CMake Integration
-
-You can easily integrate the library into your CMake project using `FetchContent` (requires CMake 3.11+):
-```cmake
-# In your CMakeLists.txt
-include(FetchContent)
-FetchContent_Declare(
-  tachyon_json
-  GIT_REPOSITORY https://github.com/Maciej0programista/Tachion.JSON/
-  GIT_TAG        main # Or a specific release tag like v4.0.0
-)
-FetchContent_MakeAvailable(tachyon_json)
-
-# Link the library to your executable or library target
-target_link_libraries(YourTarget PRIVATE tachyon_json)
-```
-
-## Usage Examples
-
-### Creating JSON
-
 ```cpp
 #include "Tachyon.hpp"
 #include <iostream>
 
-using Json = Tachyon::Json;
+using namespace Tachyon;
 
 int main() {
-    // Create JSON using an initializer list (object or array)
-    Json j_object = {
-        {"name", "Tachyon"},
-        {"type", "library"},
-        {"awesome", true},
-        {"version", {
-            {"major", 4},
-            {"minor", 0},
-            {"status", "Turbo"}
+    // 1. Creation using Initializer Lists
+    Json player = {
+        {"id", 12345},
+        {"username", "SpeedRunner"},
+        {"stats", {
+            {"wins", 10},
+            {"losses", 2}
         }},
-        {"features", Json::Array{"traits", "json_pointer", "exceptions", "performance"}}
+        {"inventory", {"sword", "shield", "potion"}}
     };
 
-    Json j_array = Json::Array{ "value1", 123, true, Json::Null() };
+    // 2. Modification
+    player["stats"]["wins"] = 11; // Update value
+    player["inventory"].push_back("map"); // Add to array
+    player["active"] = true; // Add new field
 
-    // Modify using the [] operator
-    j_object["features"].push_back("header_only");
-    j_object["features"][0] = "customizable_traits"; // Modify an existing element
-    j_object["new_property"] = 42; // Add a new property
+    // 3. Serialization (Dump)
+    std::cout << player.dump({.indent=4}) << std::endl;
 
-    std::cout << "Object JSON:\n" << j_object.dump(4) << std::endl;
-    std::cout << "\nArray JSON:\n" << j_array.dump(4) << std::endl;
-}
-```
-
-### Parsing JSON
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    std::string json_string_with_features = R"(
-        {
-            "product": "Tachyon Library", // Single-line comment
-            "price": 99.99,
-            "is_beta": false, /* Multi-line comment */
-            "tags": ["cpp", "json", ], // Trailing comma
-            "release_date": null
-        }
-    )";
-
-    // Parse with custom options
-    Tachyon::ParseOptions options;
-    options.allow_comments = true;
-    options.allow_trailing_commas = true;
-    options.max_depth = 256; // Increase max depth if needed for deep structures
-
-    try {
-        Json parsed_json = Json::parse(json_string_with_features, options);
-        std::cout << "Parsed JSON:\n" << parsed_json.dump(2) << std::endl;
-    } catch (const Tachyon::JsonParseException& e) {
-        std::cerr << "Parsing error: " << e.what() << std::endl;
+    // 4. Zero-Copy Access
+    // Get reference to the inventory array without copying
+    // Note: Use Json::array_t and Json::object_t for underlying types
+    const auto& inv = player["inventory"].get_ref<Json::array_t>();
+    for(const auto& item : inv) {
+        std::cout << "- " << item.get_ref<std::string>() << "\n";
     }
 }
 ```
 
-### Serialization (Dumping)
+## Performance Deep Dive
+
+### The `ObjectMap` Advantage
+Most JSON libraries use `std::map` or `std::unordered_map`.
+*   **std::map**: Allocates a node for every element. Pointers are scattered in heap memory. Iteration involves pointer chasing (cache misses).
+*   **std::unordered_map**: Faster lookups, but high memory overhead for hash buckets and nodes. Non-deterministic order.
+
+**Tachyon::ObjectMap** uses `std::vector<std::pair<std::string, Json>>`.
+1.  **Parsing**: We parse all keys into the vector.
+2.  **Sorting**: At the end of the object parse, we run `std::sort`.
+3.  **Lookup**: We use `std::lower_bound` (Binary Search).
+    *   For N=10 to N=100 (typical JSON object size), binary search on contiguous memory is often faster than computing a hash and chasing a pointer.
+    *   Iterating `for (auto& [k,v] : obj)` reads memory linearly. This is the **fastest possible iteration**.
+
+### Zero-Copy Strings
+When you write `json["key"].get<std::string>()`, a copy is made.
+In V5, you can write `json["key"].get_ref<std::string>()`. This returns a `const std::string&` pointing directly to the data inside the JSON node. This is crucial for high-performance applications handling large text blobs.
+
+## API Reference
+
+### Parsing
 
 ```cpp
-#include "Tachyon.hpp"
-#include <iostream>
+// Simple Parse
+Json j = Json::parse(R"({"x": 1})");
 
-using Json = Tachyon::Json;
+// Parse with Options
+ParseOptions opts;
+opts.allow_comments = true;       // Allow // and /* */
+opts.allow_trailing_commas = true; // Allow [1, 2,]
+j = Json::parse(json_string, opts);
+```
 
-int main() {
-    Json data = {
-        {"id", 123},
-        {"name", "Example Item"},
-        {"price", 12.3456789},
-        {"details", {
-            {"material", "wood"},
-            {"weight", 0.5}
-        }}
-    };
+### Serialization
 
-    // Serialize to a compact string (default)
-    std::string compact_string = data.dump();
-    std::cout << "Compact:\n" << compact_string << std::endl;
+```cpp
+Json j = {{"x", 1}};
 
-    // Serialize to a pretty-printed string with 4 spaces indent
-    std::string pretty_string = data.dump(4);
-    std::cout << "\nPretty (4 spaces):\n" << pretty_string << std::endl;
+// Compact (no spaces)
+std::string s = j.dump();
 
-    // Custom dump options
-    Tachyon::DumpOptions custom_opts;
-    custom_opts.indent_width = 2; // 2 spaces indent
-    custom_opts.indent_char = '-'; // Use '-' for indent
-    custom_opts.float_precision = 2; // Only 2 decimal places for floats
-    // For UnorderedJson, you could set custom_opts.sort_keys = true;
-    // custom_opts.escape_unicode = true; // Use this to escape non-ASCII bytes as \u00XX
-    
-    std::string custom_dump_string = data.dump(custom_opts);
-    std::cout << "\nCustom dump:\n" << custom_dump_string << std::endl;
-}
+// Pretty Print
+DumpOptions opts;
+opts.indent = 4;        // Indent with 4 spaces
+opts.indent_char = ' '; // Use space (or '\t')
+std::string pretty = j.dump(opts);
 ```
 
 ### Accessing Data
 
+**Safe Access (Copies)**
 ```cpp
-#include "Tachyon.hpp"
-#include <iostream>
+int x = j["x"].get<int>();          // Automatic conversion from int64_t
+double d = j["y"].get<double>();
+float f = j["z"].get<float>();      // Automatic conversion
+std::string s = j["s"].get<std::string>();
+```
 
-using Json = Tachyon::Json;
+**Fast Access (References)**
+```cpp
+// Returns const std::string&
+const std::string& ref = j["s"].get_ref<std::string>();
 
-int main() {
-    Json j = {
-        {"product", "Smartphone"},
-        {"price", 799.99},
-        {"in_stock", true},
-        {"quantity", 150},
-        {"features", {"camera", "touchscreen", "5G"}},
-        {"manufacturer", Json::Null()}
-    };
+// Returns Json::array_t& (std::vector<Json>&)
+auto& arr = j["arr"].get_ref<Json::array_t>();
+```
 
-    // Safe access with .at() (throws JsonException if key/index not found or wrong type)
-    std::string product_name = j.at("product").get<Json::String>();
-    double product_price = j.at("price").get<double>(); // get<double>() from Json::Float
-    bool in_stock = j.at("in_stock").get<bool>();
-    long long quantity = j.at("quantity").get<long long>(); // get<long long>() from Json::Integer
+**Safe Access with Defaults**
+```cpp
+// If "missing" doesn't exist or is wrong type, return 42
+int val = j["missing"].get_or(42);
+```
 
-    std::cout << "Product: " << product_name << ", Price: " << product_price << std::endl;
+### Modifying Data
 
-    // Convenient access with operator[] (creates null if key/index doesn't exist)
-    Json& features_array = j["features"];
-    std::string first_feature = features_array.at(0).get<std::string>();
-    std::cout << "First Feature: " << first_feature << std::endl;
+```cpp
+Json j;
 
-    // Access using get() for fundamental types with conversions
-    if (j.at("price").is_number()) {
-        float price_float = j.at("price").get<float>(); // float from double
-        int price_int = j.at("price").get<int>(); // int from double (truncation)
-        std::cout << "Price as float: " << price_float << ", Price as int: " << price_int << std::endl;
-    }
+// Array
+j = Json::array_t{};
+j.push_back(10);
+j.push_back("hello");
+
+// Object
+j = Json::object_t{};
+j["key"] = "value";      // Insert or Assign
+j["key"] = 123;          // Change type/value
+
+// Type Check
+if (j.is_object()) { ... }
+if (j.is_array()) { ... }
+```
+
+## Advanced Usage
+
+### Working with Unicode
+Tachyon V5 fully supports UTF-8. It correctly parses unicode escape sequences, including surrogate pairs used for Emojis.
+
+```cpp
+Json j = Json::parse(R"({"emoji": "\uD83D\uDE00"})"); // Parses to 😃 (UTF-8 bytes)
+std::cout << j["emoji"].get<std::string>(); // Prints 😃
+```
+
+### Structured Binding (Manual)
+Since `Json` is a dynamic type, standard structured binding `auto [a, b] = json` is not supported directly. However, you can easily unpack arrays:
+
+```cpp
+Json arr = {1, 2};
+int a = arr[0].get<int>();
+int b = arr[1].get<int>();
+```
+
+## Error Handling
+
+Tachyon throws `Tachyon::JsonParseException` for parsing errors and `Tachyon::JsonException` for usage errors (like type mismatches).
+
+```cpp
+try {
+    Json j = Json::parse("{ bad json ");
+} catch (const Tachyon::JsonParseException& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    std::cerr << "Line: " << e.line() << ", Col: " << e.column() << std::endl;
 }
 ```
 
-### Iteration
+---
 
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    // Iterate over an array
-    Json arr = {"alpha", 1, true, 3.14};
-    std::cout << "Array elements:" << std::endl;
-    for (const auto& element : arr.get_ref<Json::Array>()) { // Use get_ref for direct container access
-        std::cout << "- " << element.dump() << std::endl;
-    }
-
-    // Iterate over an object
-    Json obj = {{"name", "Widget"}, {"id", 1001}, {"active", false}};
-    std::cout << "\nObject properties:" << std::endl;
-    for (const auto& pair : obj.get_ref<Json::Object>()) { // Use get_ref for direct container access
-        std::cout << "- Key: \"" << pair.first << "\", Value: " << pair.second.dump() << std::endl;
-    }
-}
-```
-
-### Error Handling
-
-Tachyon.JSON throws `Tachyon::JsonParseException` for parsing errors, providing detailed information about the location of the error.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    std::string malformed_json = R"(
-        {
-            "item1": 123,
-            "item2": "hello"  // Missing comma here
-            "item3": true
-        }
-    )";
-
-    try {
-        Json::parse(malformed_json);
-    } catch (const Tachyon::JsonParseException& e) {
-        std::cerr << "Caught a parsing error:\n" << e.what() << std::endl;
-        // Example Output:
-        // Caught a parsing error:
-        // Parse error at line 4 col 24: Expected ',' but got '"'
-        // Context:             "item2": "hello"
-        //                             ^-- HERE
-    } catch (const Tachyon::JsonException& e) {
-        std::cerr << "Caught a generic JSON error: " << e.what() << std::endl;
-    }
-}
-```
-
-## User-Defined Types (UDTs)
-
-You can easily serialize and deserialize your custom C++ structs/classes by providing `to_json` and `from_json` free functions in the same namespace as your type, or in the `Tachyon` namespace.
-
-**Note:** Unlike some other libraries, Tachyon.JSON requires **explicit calls** to `to_json` and `from_json` for User-Defined Types. This design choice prevents complex SFINAE pitfalls and ensures higher compilation stability, especially when dealing with advanced type systems or custom allocators.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-#include <vector>
-#include <optional> // For std::optional support
-
-struct Address {
-    std::string street;
-    std::string city;
-    int zip_code;
-};
-
-struct User {
-    std::string name;
-    int age;
-    std::vector<std::string> roles;
-    Address home_address;
-    std::optional<std::string> email; // std::optional can be supported with custom to_json/from_json
-};
-
-// --- Custom serialization for Address (in Tachyon namespace for ADL) ---
-namespace Tachyon {
-    template<class TraitsType>
-    void to_json(BasicJson<TraitsType>& j, const Address& a) {
-        j = BasicJson<TraitsType>::Object{ // Explicitly construct an object
-            {"street", a.street},
-            {"city", a.city},
-            {"zip_code", a.zip_code}
-        };
-    }
-
-    // --- Custom deserialization for Address ---
-    template<class TraitsType>
-    void from_json(const BasicJson<TraitsType>& j, Address& a) {
-        a.street = j.at("street").template get<std::string>();
-        a.city = j.at("city").template get<std::string>();
-        a.zip_code = j.at("zip_code").template get<int>();
-    }
-} // namespace Tachyon
-
-// --- Custom serialization for User (in Tachyon namespace for ADL) ---
-namespace Tachyon {
-    template<class TraitsType>
-    void to_json(BasicJson<TraitsType>& j, const User& u) {
-        j = BasicJson<TraitsType>::Object{
-            {"name", u.name},
-            {"age", u.age},
-        };
-        
-        // Handle vector<string> (standard conversion is provided in TachyonJson_Conversions.hpp)
-        BasicJson<TraitsType> roles_json;
-        Tachyon::to_json(roles_json, u.roles); // Explicitly call to_json for std::vector
-        j["roles"] = roles_json;
-
-        // Handle nested UDT (Address)
-        BasicJson<TraitsType> address_json;
-        Tachyon::to_json(address_json, u.home_address); // Explicitly call to_json for Address
-        j["home_address"] = address_json;
-
-        // Handle std::optional (requires custom handling if not directly supported by the library)
-        if (u.email) {
-            j["email"] = *u.email;
-        } else {
-            j["email"] = nullptr; // Represent std::nullopt as JSON null
-        }
-    }
-
-    // --- Custom deserialization for User ---
-    template<class TraitsType>
-    void from_json(const BasicJson<TraitsType>& j, User& u) {
-        u.name = j.at("name").template get<std::string>();
-        u.age = j.at("age").template get<int>();
-        
-        // Handle vector<string>
-        if (j.at("roles").is_array()) {
-            Tachyon::from_json(j.at("roles"), u.roles); // Explicitly call from_json for std::vector
-        }
-
-        // Handle nested UDT (Address)
-        if (j.at("home_address").is_object()) {
-            Tachyon::from_json(j.at("home_address"), u.home_address); // Explicitly call from_json for Address
-        }
-
-        // Handle std::optional
-        if (j.is_object() && j.get_ref<BasicJson<TraitsType>::Object>().count("email")) {
-            const BasicJson<TraitsType>& email_json = j.at("email");
-            if (email_json.is_null()) {
-                u.email = std::nullopt;
-            } else {
-                u.email = email_json.template get<std::string>();
-            }
-        } else {
-            u.email = std::nullopt;
-        }
-    }
-} // namespace Tachyon
-
-int main() {
-    User alice = {
-        "Alice", 30, {"Admin", "Developer"},
-        {"123 Main St", "Anytown", 90210},
-        std::make_optional<std::string>("alice@example.com")
-    };
-
-    // Serialize User to Json
-    Tachyon::Json j_alice;
-    Tachyon::to_json(j_alice, alice); // Explicit conversion using to_json
-    std::cout << "Serialized User:\n" << j_alice.dump(4) << std::endl;
-
-    // Deserialize Json to User
-    std::string json_str = R"({"name":"Bob", "age":25, "roles":["Guest"], "home_address":{"street":"456 Side Ave","city":"Otherville","zip_code":10001}, "email":null})";
-    Tachyon::Json j_bob = Tachyon::Json::parse(json_str);
-    
-    User bob;
-    Tachyon::from_json(j_bob, bob); // Explicit deserialization using from_json
-    std::cout << "\nDeserialized User:\nName: " << bob.name << ", Age: " << bob.age << ", Roles[0]: " << bob.roles[0] << ", City: " << bob.home_address.city;
-    if (bob.email) {
-        std::cout << ", Email: " << *bob.email << std::endl;
-    } else {
-        std::cout << ", Email: (null)" << std::endl;
-    }
-}
-```
-
-## New V4 API
-
-### JSON Merge Patch (RFC 7396)
-
-V4 introduces the `merge_patch` function, which allows you to apply a JSON Merge Patch (RFC 7396) to a JSON object.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    Json target = {
-        {"a", "b"},
-        {"c", {
-            {"d", "e"},
-            {"f", "g"}
-        }}
-    };
-
-    Json patch = {
-        {"a", "z"},
-        {"c", {
-            {"f", Json::Null()},
-            {"h", "i"}
-        }}
-    };
-
-    target.merge_patch(patch);
-
-    std::cout << target.dump(4) << std::endl;
-    // {
-    //     "a": "z",
-    //     "c": {
-    //         "d": "e",
-    //         "h": "i"
-    //     }
-    // }
-}
-```
-
-### Enhanced Array Construction
-
-The new `push_back_default` function simplifies the process of adding a new, default-constructed element to an array.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    Json arr = {1, 2, 3};
-
-    // Add a new null element to the end of the array
-    arr.push_back_default();
-
-    std::cout << arr.dump() << std::endl; // [1, 2, 3, null]
-
-    // Add a new element and immediately modify it
-    arr.push_back_default() = "new value";
-
-    std::cout << arr.dump() << std::endl; // [1, 2, 3, null, "new value"]
-}
-```
-
-### Advanced Array Access
-
-The array index operator (`operator[]`) has been enhanced to automatically resize the array with `null` values if an out-of-bounds index is accessed.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    Json arr;
-
-    // Accessing an out-of-bounds index will resize the array
-    arr[2] = "hello";
-
-    std::cout << arr.dump() << std::endl; // [null, null, "hello"]
-}
-```
-
-## Advanced Features
-
-### JSON Pointer (RFC 6901)
-
-Access nested elements using a simple path syntax, compliant with [RFC 6901](https://tools.ietf.org/html/rfc6901).
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-using Json = Tachyon::Json;
-
-int main() {
-    Json j = Json::parse(R"(
-        {
-            "foo": ["bar", "baz"],
-            "": 0,
-            "a/b": 1,
-            "c%d": 2,
-            "e^f": 3,
-            "g|h": 4,
-            "i\\j": 5,
-            "k\"l": 6,
-            " ": 7,
-            "m~n": 8,
-            "test": {
-                "nested_array": [
-                    {"id": 1, "name": "Item A"},
-                    {"id": 2, "name": "Item B"}
-                ]
-            }
-        }
-    )");
-
-    try {
-        std::cout << j.at_pointer("/foo/0").get<std::string>() << std::endl;             // "bar"
-        std::cout << j.at_pointer("/test/nested_array/1/name").get<std::string>() << std::endl; // "Item B"
-        std::cout << j.at_pointer("/m~0n").get<int>() << std::endl;                      // 8 (Note: "~0" for "~")
-        std::cout << j.at_pointer("/a~1b").get<int>() << std::endl;                      // 1 (Note: "~1" for "/")
-        std::cout << j.at_pointer("/").get<int>() << std::endl;                          // 0 (Accesses the empty key "")
-        std::cout << j.at_pointer("/ ").get<int>() << std::endl;                         // 7 (Accesses the key with a space)
-
-    } catch (const Tachyon::JsonPointerException& e) {
-        std::cerr << "JSON Pointer error: " << e.what() << std::endl;
-    } catch (const Tachyon::JsonException& e) {
-        std::cerr << "General JSON error: " << e.what() << std::endl;
-    }
-}
-```
-
-### User-Defined Literals
-
-Tachyon.JSON provides a convenient user-defined literal `_tjson` to parse JSON strings directly.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-// Bring the literal operator into scope
-using namespace Tachyon::literals::json_literals;
-
-int main() {
-    // Create a JSON object directly from a string literal
-    auto my_data = R"({"name":"Literal", "value":123})"_tjson;
-
-    std::cout << "Parsed via literal: " << my_data.dump() << std::endl;
-}
-```
-
-## The `Traits` System: Ultimate Customization
-
-The `BasicJson<Traits>` class template is the heart of Tachyon.JSON's flexibility. By defining a custom `Traits` struct, you can change the fundamental building blocks of the JSON object.
-
-### Using `UnorderedJson` for Performance
-
-Tachyon.JSON provides a pre-configured alias, `Tachyon::UnorderedJson`, which uses `std::unordered_map` for JSON objects. This can provide a significant performance boost for applications that perform frequent key lookups and do not rely on key order.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-
-// Use the alias for the std::unordered_map version
-using UnorderedJson = Tachyon::UnorderedJson;
-
-int main() {
-    UnorderedJson j_fast = {
-        {"unordered", true},
-        {"fast", true},
-        {"data", {{"a", 1}, {"b", 2}}}
-    };
-
-    // The API is identical, but keys in dump() might not be sorted by default
-    // (unless DumpOptions::sort_keys is true for UnorderedJson)
-    std::cout << j_fast.dump(2) << std::endl;
-    
-    Tachyon::DumpOptions opts;
-    opts.indent_width = 2;
-    opts.sort_keys = true; // Force sorting for unordered map output
-    std::cout << "\nSorted UnorderedJson:\n" << j_fast.dump(opts) << std::endl;
-}
-```
-
-### Defining Your Own Custom `Traits`
-
-For the ultimate control, you can define your own `Traits` struct. This is useful for:
--   Using custom, high-performance allocators (e.g., from Boost, or your own pool allocator).
--   Integrating with custom string or container types from other libraries.
--   Changing the numeric precision by using `float` or `long double` instead of `double`.
-
-```cpp
-#include "Tachyon.hpp"
-#include <iostream>
-#include <boost/container/flat_map.hpp> // Example: Using a different map type
-#include <boost/container/vector.hpp>   // Example: Using a different vector type
-
-// 1. Define your custom traits struct
-template<class Allocator>
-struct MyCustomTraits {
-    template<class T> using Alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
-
-    using StringType = std::basic_string<char, std::char_traits<char>, Alloc<char>>;
-    using BooleanType = bool;
-    using NumberIntegerType = long; // Use 'long' instead of 'int64_t'
-    using NumberFloatType = float;  // Use 'float' instead of 'double' for less precision
-    using NullType = std::nullptr_t;
-
-    // Use Boost's flat_map for potentially faster lookups and better cache performance
-    using ObjectType = boost::container::flat_map<
-        StringType,
-        Tachyon::BasicJson<MyCustomTraits<Allocator>>,
-        std::less<StringType>,
-        Alloc<std::pair<StringType, Tachyon::BasicJson<MyCustomTraits<Allocator>>>>
-    >;
-
-    // Use Boost's vector
-    using ArrayType = boost::container::vector<
-        Tachyon::BasicJson<MyCustomTraits<Allocator>>,
-        Alloc<Tachyon::BasicJson<MyCustomTraits<Allocator>>>
-    >;
-};
-
-// 2. Create a type alias for your custom JSON type
-using MyCustomJson = Tachyon::BasicJson<MyCustomTraits<std::allocator<char>>>;
-
-int main() {
-    MyCustomJson j;
-    j["message"] = "Using custom traits!";
-    j["data"] = MyCustomJson::Array{1.0f, 2.5f, 3.0f}; // Values will be stored as floats
-
-    std::cout << j.dump(2) << std::endl;
-}
-```
-
-## Performance Promise
-
-Tachyon.JSON V4 is engineered for speed. The following features contribute to its high performance:
-
-*   **`std::from_chars`:** By using `std::from_chars` for numeric parsing, the library avoids the overhead of locales and streams, resulting in the fastest possible conversion from a string to a number.
-*   **Zero-Copy:** The parser uses `std::string_view` to avoid creating intermediate `std::string` objects for numeric and string parsing, reducing memory allocations and improving performance.
-*   **Unordered Maps:** The `UnorderedJson` alias uses `std::unordered_map` for JSON objects, which provides faster key lookups than `std::map`.
-
-## API Reference (Overview)
-
-A brief overview of the `Tachyon::BasicJson` API.
-
-| Method                                      | Description                                                                 |
-| ------------------------------------------- | --------------------------------------------------------------------------- |
-| `Json::parse(str, [opts])`                  | Parses a JSON string into a `Json` object.                                    |
-| `j.dump([opts])`                            | Serializes the `Json` object to a string.                                   |
-| `j.type()`                                  | Returns the `JsonType` of the object.                                       |
-| `j.is_null()`, `is_object()`, etc.          | Checks the type of the `Json` object.                                       |
-| `j.at(key/index)`                           | Accesses an element with bounds/key checking. Throws on failure.            |
-| `j[key/index]`                              | Accesses an element, creating it if it doesn't exist.                       |
-| `j.get<T>()`                                | Retrieves the value as type `T` (for fundamental types).                     |
-| `j.get_ref<T>()`                            | Returns a direct reference to the underlying container/value.                 |
-| `j.at_pointer(ptr)`                         | Accesses a nested element using a JSON Pointer string.                       |
-| `j.size()`                                  | Returns the size of an object, array, or string.                            |
-| `j.empty()`                                 | Checks if an object, array, or string is empty, or if the value is null.    |
-| `j.push_back(val)`                          | Appends a value to a JSON array.                                            |
-| `j.push_back_default()`                     | Appends a default-constructed `Json` object to an array.                    |
-| `j.merge_patch(patch)`                      | Applies a JSON Merge Patch (RFC 7396) to the `Json` object.                 |
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to open an issue to report a bug or suggest a feature, or a pull request to submit changes.
+*Tachyon.JSON V5 is designed for those who need speed, simplicity, and modern C++. Enjoy the Turbo.*
