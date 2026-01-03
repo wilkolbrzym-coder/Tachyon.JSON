@@ -15,6 +15,8 @@
 #include <map>
 #include <variant>
 #include <charconv>
+#include <initializer_list>
+#include <functional>
 
 #ifdef __BMI2__
 #include <immintrin.h>
@@ -28,13 +30,29 @@ namespace Tachyon {
 }
 
 namespace Tachyon::ASM {
+    // Branchless whitespace skip for small gaps?
+    // AVX2 skip?
+    // For now, inline scalar is very fast for small gaps.
     inline const char* skip_whitespace(const char* p, const char* end) {
+        // Fast skip 4 bytes?
+        while (p + 4 <= end) {
+            uint32_t v;
+            std::memcpy(&v, p, 4);
+            // Check if any byte > 32
+            // If v has any byte > 32, we stop.
+            // Simplified: loop.
+            if ((unsigned char)*p > 32) return p; p++;
+            if ((unsigned char)*p > 32) return p; p++;
+            if ((unsigned char)*p > 32) return p; p++;
+            if ((unsigned char)*p > 32) return p; p++;
+        }
         while (p < end && (unsigned char)*p <= 32) p++;
         return p;
     }
 }
 
 namespace Tachyon::SIMD {
+    // V12: Unrolled 64-byte loop
     inline size_t compute_structural_mask(const char* data, size_t len, uint32_t* mask_array) {
         const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
         size_t i = 0;
@@ -52,64 +70,99 @@ namespace Tachyon::SIMD {
         uint32_t in_string_mask = 0;
         uint64_t prev_escapes = 0;
 
-        for (; i + 32 <= len; i += 32) {
-            __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
-            __m256i cmp_bs = _mm256_cmpeq_epi8(chunk, v_backslash);
-            uint32_t bs_mask = _mm256_movemask_epi8(cmp_bs);
-            uint32_t quote_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v_quote));
+        // Unrolled Loop (64 bytes per step)
+        for (; i + 64 <= len; i += 64) {
+            // Prefetch ahead
+            _mm_prefetch(reinterpret_cast<const char*>(p + i + 128), _MM_HINT_T0);
 
-            // Handle escape sequences
-            if (bs_mask != 0 || prev_escapes > 0) {
-                 uint32_t real_quote_mask = 0;
-                 const char* c_ptr = reinterpret_cast<const char*>(&chunk);
+            // Block 1 (0-31)
+            __m256i chunk1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
 
-                 // Scalar fallback for correctness with backslashes
-                 // Optimized scalar loop: unrolling usually done by compiler
-                 for(int j=0; j<32; ++j) {
-                     char c = c_ptr[j];
-                     if ((c == '"') && ((prev_escapes & 1) == 0)) {
-                         real_quote_mask |= (1U << j);
+            // Block 2 (32-63)
+            __m256i chunk2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i + 32));
+
+            // Process Block 1
+            {
+                __m256i cmp_bs = _mm256_cmpeq_epi8(chunk1, v_backslash);
+                uint32_t bs_mask = _mm256_movemask_epi8(cmp_bs);
+                uint32_t quote_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk1, v_quote));
+
+                if (__builtin_expect(bs_mask != 0 || prev_escapes > 0, 0)) {
+                     uint32_t real_quote_mask = 0;
+                     const char* c_ptr = reinterpret_cast<const char*>(&chunk1);
+                     for(int j=0; j<32; ++j) {
+                         char c = c_ptr[j];
+                         if ((c == '"') && ((prev_escapes & 1) == 0)) real_quote_mask |= (1U << j);
+                         if (c == '\\') prev_escapes++; else prev_escapes = 0;
                      }
-                     if (c == '\\') {
-                         prev_escapes++;
-                     } else {
-                         prev_escapes = 0;
-                     }
-                 }
-                 quote_mask = real_quote_mask;
-            } else {
-                // No backslashes in this block AND no carry over
-                prev_escapes = 0;
+                     quote_mask = real_quote_mask;
+                } else {
+                    prev_escapes = 0;
+                }
+
+                uint32_t prefix = quote_mask;
+                prefix ^= (prefix << 1); prefix ^= (prefix << 2); prefix ^= (prefix << 4); prefix ^= (prefix << 8); prefix ^= (prefix << 16);
+                if (in_string_mask) prefix = ~prefix;
+                if (std::popcount(quote_mask) % 2 != 0) in_string_mask = !in_string_mask;
+
+                __m256i s = _mm256_cmpeq_epi8(chunk1, v_lbrace);
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk1, v_rbrace));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk1, v_lbracket));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk1, v_rbracket));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk1, v_colon));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk1, v_comma));
+
+                uint32_t struct_mask = _mm256_movemask_epi8(s);
+                uint32_t interior = prefix & ~quote_mask;
+                mask_array[block_idx++] = (struct_mask | quote_mask) & ~interior;
             }
 
-            uint32_t prefix = quote_mask;
-            prefix ^= (prefix << 1);
-            prefix ^= (prefix << 2);
-            prefix ^= (prefix << 4);
-            prefix ^= (prefix << 8);
-            prefix ^= (prefix << 16);
+            // Process Block 2
+            {
+                __m256i cmp_bs = _mm256_cmpeq_epi8(chunk2, v_backslash);
+                uint32_t bs_mask = _mm256_movemask_epi8(cmp_bs);
+                uint32_t quote_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk2, v_quote));
 
-            if (in_string_mask) prefix = ~prefix;
-            if (std::popcount(quote_mask) % 2 != 0) in_string_mask = !in_string_mask;
+                if (__builtin_expect(bs_mask != 0 || prev_escapes > 0, 0)) {
+                     uint32_t real_quote_mask = 0;
+                     const char* c_ptr = reinterpret_cast<const char*>(&chunk2);
+                     for(int j=0; j<32; ++j) {
+                         char c = c_ptr[j];
+                         if ((c == '"') && ((prev_escapes & 1) == 0)) real_quote_mask |= (1U << j);
+                         if (c == '\\') prev_escapes++; else prev_escapes = 0;
+                     }
+                     quote_mask = real_quote_mask;
+                } else {
+                    prev_escapes = 0;
+                }
 
-            __m256i s = _mm256_cmpeq_epi8(chunk, v_lbrace);
-            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_rbrace));
-            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_lbracket));
-            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_rbracket));
-            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_colon));
-            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_comma));
+                uint32_t prefix = quote_mask;
+                prefix ^= (prefix << 1); prefix ^= (prefix << 2); prefix ^= (prefix << 4); prefix ^= (prefix << 8); prefix ^= (prefix << 16);
+                if (in_string_mask) prefix = ~prefix;
+                if (std::popcount(quote_mask) % 2 != 0) in_string_mask = !in_string_mask;
 
-            uint32_t struct_mask = _mm256_movemask_epi8(s);
-            uint32_t interior = prefix & ~quote_mask;
-            uint32_t final_mask = (struct_mask | quote_mask) & ~interior;
+                __m256i s = _mm256_cmpeq_epi8(chunk2, v_lbrace);
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk2, v_rbrace));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk2, v_lbracket));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk2, v_rbracket));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk2, v_colon));
+                s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk2, v_comma));
 
-            mask_array[block_idx++] = final_mask;
+                uint32_t struct_mask = _mm256_movemask_epi8(s);
+                uint32_t interior = prefix & ~quote_mask;
+                mask_array[block_idx++] = (struct_mask | quote_mask) & ~interior;
+            }
         }
 
         // Scalar Tail
         if (i < len) {
             uint32_t final_mask = 0;
             for (size_t j = 0; i < len; ++i, ++j) {
+                if (j == 32) { // Should not happen if chunks aligned, but reset bit index
+                     mask_array[block_idx++] = final_mask;
+                     final_mask = 0;
+                     j = 0;
+                }
                 char c = data[i];
                 bool is_quote = (c == '"') && ((prev_escapes & 1) == 0);
 
@@ -479,4 +532,14 @@ namespace Tachyon {
         }
     };
 }
-#endif
+
+// -----------------------------------------------------------------------------
+// Nlohmann-like API Facade
+// -----------------------------------------------------------------------------
+namespace Tachyon {
+    // Macro to map structs
+    #define TACHYON_DEFINE_TYPE_NON_INTRUSIVE(Type, ...) \
+        /* Implementation placeholder for struct mapping */
+}
+
+#endif // TACHYON_HPP
