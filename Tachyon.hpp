@@ -1,831 +1,482 @@
 #ifndef TACHYON_HPP
 #define TACHYON_HPP
 
-/*
- * Tachyon v5.3 "Turbo"
- * The World's Fastest JSON Library
- */
-
-#include <algorithm>
-#include <bit>
-#include <cassert>
-#include <charconv>
-#include <cmath>
-#include <concepts>
-#include <cstdint>
-#include <cstring>
-#include <format>
-#include <initializer_list>
 #include <iostream>
-#include <iterator>
-#include <map>
-#include <memory>
-#include <optional>
-#include <ranges>
-#include <stdexcept>
+#include <vector>
 #include <string>
 #include <string_view>
-#include <type_traits>
+#include <cstring>
+#include <immintrin.h>
+#include <bit>
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+#include <memory>
+#include <map>
 #include <variant>
-#include <vector>
+#include <charconv>
 
-// Platform & SIMD Checks
-#if defined(__x86_64__) || defined(_M_X64)
-    #include <immintrin.h>
-    #define TACHYON_X64 1
-    #define TACHYON_HAS_AVX2 1
-    #ifdef _MSC_VER
-        #include <intrin.h>
-        #define TACHYON_MSVC 1
-    #else
-        #define TACHYON_MSVC 0
-    #endif
-#else
-    #define TACHYON_X64 0
-    #define TACHYON_HAS_AVX2 0
-    #define TACHYON_MSVC 0
+#ifdef __BMI2__
+#include <immintrin.h>
 #endif
 
 namespace Tachyon {
+    struct Value;
+    class Document;
+    class Parser;
+    enum class Type : uint8_t { Null, False, True, Number, String, Array, Object };
+}
 
-// -----------------------------------------------------------------------------
-// Configuration
-// -----------------------------------------------------------------------------
-
-class Json;
-class ObjectMap;
-
-struct ParseOptions {
-    bool allow_comments = true;
-    bool allow_trailing_commas = true;
-    bool fast_float = true;
-};
-
-struct DumpOptions {
-    int indent = -1;
-    char indent_char = ' ';
-    bool sort_keys = false;
-    bool ascii_only = false;
-};
-
-enum class Type : uint8_t {
-    Null, Boolean, NumberInt, NumberFloat, String, Array, Object, Binary
-};
-
-// -----------------------------------------------------------------------------
-// ASM / SIMD Internals
-// -----------------------------------------------------------------------------
-
-namespace ASM {
-    inline const char* skip_whitespace_asm(const char* ptr) {
-#if TACHYON_X64 && !TACHYON_MSVC
-        // GCC/Clang Inline Assembly
-        const char* result;
-        __asm__ volatile (
-            "1:\n\t"
-            "movzbl (%1), %%eax\n\t"
-            "cmp $0x20, %%al\n\t" "je 2f\n\t"
-            "cmp $0x0A, %%al\n\t" "je 2f\n\t"
-            "cmp $0x0D, %%al\n\t" "je 2f\n\t"
-            "cmp $0x09, %%al\n\t" "je 2f\n\t"
-            "jmp 3f\n"
-            "2:\n\t"
-            "inc %1\n\t"
-            "jmp 1b\n"
-            "3:\n\t"
-            "mov %1, %0"
-            : "=r" (result) : "r" (ptr) : "rax", "cc"
-        );
-        return result;
-#else
-        // Scalar Fallback (also used for MSVC where inline asm is not supported x64)
-        while (*ptr == ' ' || *ptr == '\n' || *ptr == '\r' || *ptr == '\t') ++ptr;
-        return ptr;
-#endif
+namespace Tachyon::ASM {
+    inline const char* skip_whitespace(const char* p, const char* end) {
+        while (p < end && (unsigned char)*p <= 32) p++;
+        return p;
     }
+}
 
-    inline const char* skip_whitespace_simd(const char* ptr, const char* end) {
-#if TACHYON_HAS_AVX2
-        const __m256i spaces = _mm256_set1_epi8(' ');
-        const __m256i newlines = _mm256_set1_epi8('\n');
-        const __m256i crs = _mm256_set1_epi8('\r');
-        const __m256i tabs = _mm256_set1_epi8('\t');
+namespace Tachyon::SIMD {
+    inline size_t compute_structural_mask(const char* data, size_t len, uint32_t* mask_array) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
+        size_t i = 0;
+        size_t block_idx = 0;
 
-        // Safety: ensure we have 32 bytes
-        while (ptr + 32 <= end) {
-            __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-            __m256i s = _mm256_cmpeq_epi8(chunk, spaces);
-            __m256i n = _mm256_cmpeq_epi8(chunk, newlines);
-            __m256i c = _mm256_cmpeq_epi8(chunk, crs);
-            __m256i t = _mm256_cmpeq_epi8(chunk, tabs);
-            __m256i mask_vec = _mm256_or_si256(_mm256_or_si256(s, n), _mm256_or_si256(c, t));
-            unsigned int mask = _mm256_movemask_epi8(mask_vec);
+        __m256i v_quote = _mm256_set1_epi8('"');
+        __m256i v_backslash = _mm256_set1_epi8('\\');
+        __m256i v_lbrace = _mm256_set1_epi8('{');
+        __m256i v_rbrace = _mm256_set1_epi8('}');
+        __m256i v_lbracket = _mm256_set1_epi8('[');
+        __m256i v_rbracket = _mm256_set1_epi8(']');
+        __m256i v_colon = _mm256_set1_epi8(':');
+        __m256i v_comma = _mm256_set1_epi8(',');
 
-            if (mask == 0xFFFFFFFF) {
-                ptr += 32;
+        uint32_t in_string_mask = 0;
+        uint64_t prev_escapes = 0;
+
+        for (; i + 32 <= len; i += 32) {
+            __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
+            __m256i cmp_bs = _mm256_cmpeq_epi8(chunk, v_backslash);
+            uint32_t bs_mask = _mm256_movemask_epi8(cmp_bs);
+            uint32_t quote_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v_quote));
+
+            // Handle escape sequences
+            if (bs_mask != 0 || prev_escapes > 0) {
+                 uint32_t real_quote_mask = 0;
+                 const char* c_ptr = reinterpret_cast<const char*>(&chunk);
+
+                 // Scalar fallback for correctness with backslashes
+                 // Optimized scalar loop: unrolling usually done by compiler
+                 for(int j=0; j<32; ++j) {
+                     char c = c_ptr[j];
+                     if ((c == '"') && ((prev_escapes & 1) == 0)) {
+                         real_quote_mask |= (1U << j);
+                     }
+                     if (c == '\\') {
+                         prev_escapes++;
+                     } else {
+                         prev_escapes = 0;
+                     }
+                 }
+                 quote_mask = real_quote_mask;
             } else {
-                int offset = std::countr_one(mask);
-                return ptr + offset;
+                // No backslashes in this block AND no carry over
+                prev_escapes = 0;
             }
-        }
-#endif
-        // Tail processing scalar
-        while (ptr < end && (*ptr == ' ' || *ptr == '\n' || *ptr == '\r' || *ptr == '\t')) ++ptr;
-        return ptr;
-    }
-}
 
-// -----------------------------------------------------------------------------
-// Internal Buffer for Serialization
-// -----------------------------------------------------------------------------
+            uint32_t prefix = quote_mask;
+            prefix ^= (prefix << 1);
+            prefix ^= (prefix << 2);
+            prefix ^= (prefix << 4);
+            prefix ^= (prefix << 8);
+            prefix ^= (prefix << 16);
 
-struct Buffer {
-    std::vector<char> data;
-    Buffer() { data.reserve(65536); }
-    void append(char c) { data.push_back(c); }
-    void append(const char* s, size_t len) { data.insert(data.end(), s, s + len); }
-    void append(std::string_view s) { append(s.data(), s.size()); }
-    std::string str() const { return std::string(data.data(), data.size()); }
-};
+            if (in_string_mask) prefix = ~prefix;
+            if (std::popcount(quote_mask) % 2 != 0) in_string_mask = !in_string_mask;
 
-// -----------------------------------------------------------------------------
-// ObjectMap Definition
-// -----------------------------------------------------------------------------
+            __m256i s = _mm256_cmpeq_epi8(chunk, v_lbrace);
+            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_rbrace));
+            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_lbracket));
+            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_rbracket));
+            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_colon));
+            s = _mm256_or_si256(s, _mm256_cmpeq_epi8(chunk, v_comma));
 
-class ObjectMap {
-public:
-    using Member = std::pair<std::string, Json>;
-    using Container = std::vector<Member>;
-    using iterator = Container::iterator;
-    using const_iterator = Container::const_iterator;
+            uint32_t struct_mask = _mm256_movemask_epi8(s);
+            uint32_t interior = prefix & ~quote_mask;
+            uint32_t final_mask = (struct_mask | quote_mask) & ~interior;
 
-    Container m_data;
-    bool m_sorted = false;
-
-    ObjectMap() = default;
-    void sort();
-
-    Json& operator[](std::string_view key);
-    const Json& at(std::string_view key) const;
-    bool contains(std::string_view key) const;
-    void insert(std::string key, Json value);
-    void erase(std::string_view key);
-
-    iterator begin() { return m_data.begin(); }
-    iterator end() { return m_data.end(); }
-    const_iterator begin() const { return m_data.begin(); }
-    const_iterator end() const { return m_data.end(); }
-    size_t size() const { return m_data.size(); }
-    bool empty() const { return m_data.empty(); }
-
-private:
-    iterator find_impl(std::string_view key);
-    const_iterator find_impl(std::string_view key) const;
-};
-
-// -----------------------------------------------------------------------------
-// Json Class Definition
-// -----------------------------------------------------------------------------
-
-class Json {
-public:
-    using array_t = std::vector<Json>;
-    using object_t = ObjectMap;
-    using binary_t = std::vector<uint8_t>;
-
-    friend class Parser;
-    friend void flatten_impl(std::string prefix, const Json& j, Json& res);
-
-private:
-    using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, std::shared_ptr<array_t>, std::shared_ptr<object_t>, binary_t>;
-    Variant m_data;
-
-public:
-    Json() : m_data(std::monostate{}) {}
-    Json(std::nullptr_t) : m_data(std::monostate{}) {}
-    Json(bool v) : m_data(v) {}
-    Json(int v) : m_data(static_cast<int64_t>(v)) {}
-    Json(int64_t v) : m_data(v) {}
-    Json(double v) : m_data(v) {}
-    Json(const char* s) : m_data(std::string(s)) {}
-    Json(std::string s) : m_data(std::move(s)) {}
-    Json(std::string_view s) : m_data(std::string(s)) {}
-    Json(const array_t& arr) : m_data(std::make_shared<array_t>(arr)) {}
-    Json(const object_t& obj) : m_data(std::make_shared<object_t>(obj)) {}
-    Json(array_t&& arr) : m_data(std::make_shared<array_t>(std::move(arr))) {}
-    Json(object_t&& obj) : m_data(std::make_shared<object_t>(std::move(obj))) {}
-
-    Json(std::initializer_list<Json> init);
-
-    // Type
-    Type type() const;
-    bool is_null() const { return type() == Type::Null; }
-    bool is_boolean() const { return type() == Type::Boolean; }
-    bool is_number_int() const { return type() == Type::NumberInt; }
-    bool is_number_float() const { return type() == Type::NumberFloat; }
-    bool is_string() const { return type() == Type::String; }
-    bool is_array() const { return type() == Type::Array; }
-    bool is_object() const { return type() == Type::Object; }
-
-    // Getters
-    template <typename T> T get() const;
-
-    // Accessors
-    Json& operator[](size_t index);
-    const Json& operator[](size_t index) const;
-    Json& operator[](std::string_view key);
-    const Json& operator[](std::string_view key) const;
-    bool contains(std::string_view key) const;
-
-    size_t size() const;
-    bool empty() const;
-    void push_back(Json val);
-    void clear();
-
-    // Advanced API
-    Json* pointer(std::string_view path);
-    const Json* pointer(std::string_view path) const;
-    void merge_patch(const Json& patch);
-    Json flatten() const;
-    static Json unflatten(const Json& flat);
-
-    // IO
-    static Json parse(std::string_view json, const ParseOptions& opts = {});
-    std::string dump(const DumpOptions& opts = {}) const;
-    void dump_to(Buffer& buf, const DumpOptions& opts) const;
-
-    bool operator==(const Json& other) const;
-};
-
-// -----------------------------------------------------------------------------
-// Parser Definition
-// -----------------------------------------------------------------------------
-
-class Parser {
-    const char* m_ptr;
-    const char* m_end;
-    ParseOptions m_opts;
-
-public:
-    Parser(std::string_view json, const ParseOptions& opts)
-        : m_ptr(json.data()), m_end(json.data() + json.size()), m_opts(opts) {}
-
-    Json parse();
-
-private:
-    Json parse_value();
-    Json parse_object();
-    Json parse_array();
-    std::string parse_string_raw();
-    Json parse_string();
-    Json parse_number();
-    Json parse_true();
-    Json parse_false();
-    Json parse_null();
-};
-
-// -----------------------------------------------------------------------------
-// Implementation: ObjectMap
-// -----------------------------------------------------------------------------
-
-inline void ObjectMap::sort() {
-    if (m_sorted) return;
-    std::sort(m_data.begin(), m_data.end(), [](const Member& a, const Member& b) {
-        return a.first < b.first;
-    });
-    m_sorted = true;
-}
-
-inline ObjectMap::iterator ObjectMap::find_impl(std::string_view key) {
-    if (m_sorted) {
-        auto it = std::lower_bound(m_data.begin(), m_data.end(), key,
-            [](const Member& m, std::string_view k) { return m.first < k; });
-        if (it != m_data.end() && it->first == key) return it;
-        return m_data.end();
-    }
-    return std::find_if(m_data.begin(), m_data.end(), [&](const Member& m) { return m.first == key; });
-}
-
-inline ObjectMap::const_iterator ObjectMap::find_impl(std::string_view key) const {
-    if (m_sorted) {
-        auto it = std::lower_bound(m_data.begin(), m_data.end(), key,
-            [](const Member& m, std::string_view k) { return m.first < k; });
-        if (it != m_data.end() && it->first == key) return it;
-        return m_data.end();
-    }
-    return std::find_if(m_data.begin(), m_data.end(), [&](const Member& m) { return m.first == key; });
-}
-
-inline Json& ObjectMap::operator[](std::string_view key) {
-    auto it = find_impl(key);
-    if (it != m_data.end()) return it->second;
-    m_data.emplace_back(std::string(key), Json());
-    m_sorted = false;
-    return m_data.back().second;
-}
-
-inline const Json& ObjectMap::at(std::string_view key) const {
-    auto it = find_impl(key);
-    if (it == m_data.end()) throw std::runtime_error("Key not found");
-    return it->second;
-}
-
-inline bool ObjectMap::contains(std::string_view key) const {
-    return find_impl(key) != m_data.end();
-}
-
-inline void ObjectMap::insert(std::string key, Json value) {
-    auto it = find_impl(key);
-    if (it != m_data.end()) it->second = std::move(value);
-    else {
-        m_data.emplace_back(std::move(key), std::move(value));
-        m_sorted = false;
-    }
-}
-
-inline void ObjectMap::erase(std::string_view key) {
-    auto it = find_impl(key);
-    if (it != m_data.end()) {
-        m_data.erase(it);
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Implementation: Json
-// -----------------------------------------------------------------------------
-
-inline Json::Json(std::initializer_list<Json> init) {
-    bool is_obj = std::all_of(init.begin(), init.end(), [](const Json& j) {
-        return j.is_array() && j.size() == 2 && j[0].is_string();
-    });
-
-    if (is_obj && init.size() > 0) {
-        auto obj = std::make_shared<object_t>();
-        for (const auto& el : init) {
-            obj->insert(el[0].get<std::string>(), el[1]);
-        }
-        obj->sort();
-        m_data = obj;
-    } else {
-        auto arr = std::make_shared<array_t>(init);
-        m_data = arr;
-    }
-}
-
-inline Type Json::type() const {
-    if (std::holds_alternative<std::monostate>(m_data)) return Type::Null;
-    if (std::holds_alternative<bool>(m_data)) return Type::Boolean;
-    if (std::holds_alternative<int64_t>(m_data)) return Type::NumberInt;
-    if (std::holds_alternative<double>(m_data)) return Type::NumberFloat;
-    if (std::holds_alternative<std::string>(m_data)) return Type::String;
-    if (std::holds_alternative<std::shared_ptr<array_t>>(m_data)) return Type::Array;
-    if (std::holds_alternative<std::shared_ptr<object_t>>(m_data)) return Type::Object;
-    return Type::Null;
-}
-
-template <typename T>
-T Json::get() const {
-    if constexpr (std::is_same_v<T, bool>) {
-        if (is_boolean()) return std::get<bool>(m_data);
-    } else if constexpr (std::integral<T>) {
-        if (is_number_int()) return static_cast<T>(std::get<int64_t>(m_data));
-        if (is_number_float()) return static_cast<T>(std::get<double>(m_data));
-    } else if constexpr (std::floating_point<T>) {
-        if (is_number_float()) return static_cast<T>(std::get<double>(m_data));
-        if (is_number_int()) return static_cast<T>(std::get<int64_t>(m_data));
-    } else if constexpr (std::is_same_v<T, std::string>) {
-        if (is_string()) return std::get<std::string>(m_data);
-    }
-    throw std::runtime_error("Type mismatch");
-}
-
-inline Json& Json::operator[](size_t index) {
-    if (is_null()) m_data = std::make_shared<array_t>();
-    if (!is_array()) throw std::runtime_error("Not an array");
-    auto& arr = *std::get<std::shared_ptr<array_t>>(m_data);
-    if (index >= arr.size()) arr.resize(index + 1);
-    return arr[index];
-}
-
-inline const Json& Json::operator[](size_t index) const {
-    if (!is_array()) throw std::runtime_error("Not an array");
-    return (*std::get<std::shared_ptr<array_t>>(m_data))[index];
-}
-
-inline Json& Json::operator[](std::string_view key) {
-    if (is_null()) m_data = std::make_shared<object_t>();
-    if (!is_object()) throw std::runtime_error("Not an object");
-    return (*std::get<std::shared_ptr<object_t>>(m_data))[key];
-}
-
-inline const Json& Json::operator[](std::string_view key) const {
-    if (!is_object()) throw std::runtime_error("Not an object");
-    return std::get<std::shared_ptr<object_t>>(m_data)->at(key);
-}
-
-inline bool Json::contains(std::string_view key) const {
-    if (!is_object()) return false;
-    return std::get<std::shared_ptr<object_t>>(m_data)->contains(key);
-}
-
-inline size_t Json::size() const {
-    if (is_array()) return std::get<std::shared_ptr<array_t>>(m_data)->size();
-    if (is_object()) return std::get<std::shared_ptr<object_t>>(m_data)->size();
-    if (is_string()) return std::get<std::string>(m_data).size();
-    return 1;
-}
-
-inline bool Json::empty() const { return size() == 0; }
-
-inline void Json::push_back(Json val) {
-    if (is_null()) m_data = std::make_shared<array_t>();
-    if (!is_array()) throw std::runtime_error("Not an array");
-    std::get<std::shared_ptr<array_t>>(m_data)->push_back(std::move(val));
-}
-
-inline void Json::clear() {
-    m_data = std::monostate{};
-}
-
-inline bool Json::operator==(const Json& other) const {
-    if (type() != other.type()) return false;
-    if (is_number_int()) return get<int64_t>() == other.get<int64_t>();
-    if (is_string()) return get<std::string>() == other.get<std::string>();
-    return true;
-}
-
-// -----------------------------------------------------------------------------
-// Advanced Features Implementation
-// -----------------------------------------------------------------------------
-
-inline Json* Json::pointer(std::string_view path) {
-    if (path.empty()) return this;
-    if (path[0] != '/') return nullptr;
-    Json* current = this;
-    size_t pos = 1;
-    while (pos < path.size()) {
-        size_t next = path.find('/', pos);
-        if (next == std::string_view::npos) next = path.size();
-        std::string_view token = path.substr(pos, next - pos);
-
-        std::string decoded;
-        decoded.reserve(token.size());
-        for(size_t i=0; i<token.size(); ++i) {
-            if(token[i] == '~' && i+1 < token.size()) {
-                if(token[i+1]=='1') { decoded+='/'; i++; }
-                else if(token[i+1]=='0') { decoded+='~'; i++; }
-                else decoded += token[i];
-            } else decoded += token[i];
+            mask_array[block_idx++] = final_mask;
         }
 
-        if (current->is_array()) {
-            int idx;
-            auto res = std::from_chars(decoded.data(), decoded.data()+decoded.size(), idx);
-            if (res.ec != std::errc() || idx < 0) return nullptr;
-            if (static_cast<size_t>(idx) >= current->size()) return nullptr;
-            current = &(*current)[idx];
-        } else if (current->is_object()) {
-             if (!current->contains(decoded)) return nullptr;
-             current = &(*current)[decoded];
-        }
-        pos = next + 1;
-    }
-    return current;
-}
+        // Scalar Tail
+        if (i < len) {
+            uint32_t final_mask = 0;
+            for (size_t j = 0; i < len; ++i, ++j) {
+                char c = data[i];
+                bool is_quote = (c == '"') && ((prev_escapes & 1) == 0);
 
-inline const Json* Json::pointer(std::string_view path) const {
-    return const_cast<Json*>(this)->pointer(path);
-}
+                if (c == '\\') prev_escapes++;
+                else prev_escapes = 0;
 
-inline void Json::merge_patch(const Json& patch) {
-    if (!patch.is_object()) {
-        *this = patch;
-        return;
-    }
-    if (!is_object()) *this = Json::object_t{};
-
-    const auto& patch_obj = *std::get<std::shared_ptr<object_t>>(patch.m_data);
-    auto& target_obj = *std::get<std::shared_ptr<object_t>>(m_data);
-
-    for (const auto& [key, val] : patch_obj) {
-        if (val.is_null()) {
-            target_obj.erase(key);
-        } else {
-            target_obj[key].merge_patch(val);
-        }
-    }
-}
-
-inline void flatten_impl(std::string prefix, const Json& j, Json& res) {
-    if (j.is_object()) {
-        const auto& obj = *std::get<std::shared_ptr<ObjectMap>>(j.m_data);
-        for (const auto& [k, v] : obj) {
-            flatten_impl(prefix + (prefix.empty()?"":".") + k, v, res);
-        }
-    } else if (j.is_array()) {
-        const auto& arr = *std::get<std::shared_ptr<std::vector<Json>>>(j.m_data);
-        for (size_t i=0; i<arr.size(); ++i) {
-            flatten_impl(prefix + (prefix.empty()?"":".") + std::to_string(i), arr[i], res);
-        }
-    } else {
-        res[prefix] = j;
-    }
-}
-
-inline Json Json::flatten() const {
-    Json res = Json::object_t{};
-    flatten_impl("", *this, res);
-    return res;
-}
-
-inline Json Json::unflatten(const Json& flat) {
-    if (!flat.is_object()) return flat;
-    Json res = Json::object_t{};
-    const auto& obj = *std::get<std::shared_ptr<ObjectMap>>(flat.m_data);
-
-    // Sort keys to ensure array indices are processed in order if possible, though naive impl follows
-    for (const auto& [key, val] : obj) {
-        Json* curr = &res;
-        std::string_view path = key;
-        size_t pos = 0;
-
-        while (pos < path.size()) {
-            size_t dot = path.find('.', pos);
-            if (dot == std::string_view::npos) dot = path.size();
-            std::string_view token = path.substr(pos, dot - pos);
-
-            bool is_array_idx = !token.empty() && std::all_of(token.begin(), token.end(), ::isdigit);
-
-            if (dot == path.size()) {
-                // Leaf
-                if (curr->is_null()) {
-                    if (is_array_idx) *curr = Json::array_t{}; else *curr = Json::object_t{};
-                }
-                if (curr->is_array()) {
-                    int idx = 0; std::from_chars(token.data(), token.data()+token.size(), idx);
-                    if ((size_t)idx >= curr->size()) (*curr)[idx] = val; // Auto-resize
-                    else (*curr)[idx] = val;
+                if (in_string_mask) {
+                    if (is_quote) {
+                        in_string_mask = 0;
+                        final_mask |= (1U << j);
+                    }
                 } else {
-                    (*curr)[token] = val;
+                    if (is_quote) {
+                        in_string_mask = 1;
+                        final_mask |= (1U << j);
+                    } else if (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',') {
+                        final_mask |= (1U << j);
+                    }
                 }
+            }
+            mask_array[block_idx++] = final_mask;
+        }
+        return block_idx;
+    }
+}
+
+namespace Tachyon {
+    class Parser {
+    public:
+        std::unique_ptr<uint32_t[]> bitmask;
+        size_t bitmask_cap = 0;
+        size_t bitmask_len = 0;
+        const char* base;
+        size_t len;
+
+        void parse(const char* data, size_t size) {
+            base = data;
+            len = size;
+            size_t mask_len = (size + 31) / 32;
+            if (mask_len > bitmask_cap) {
+                bitmask.reset(new uint32_t[mask_len]);
+                bitmask_cap = mask_len;
+            }
+            bitmask_len = SIMD::compute_structural_mask(base, len, bitmask.get());
+        }
+    };
+
+    struct Cursor {
+        uint32_t block_idx;
+        uint32_t mask;
+        const Parser* parser;
+
+        Cursor(const Parser* p, uint32_t offset) : parser(p) {
+            block_idx = offset / 32;
+            int bit = offset % 32;
+            if (block_idx < parser->bitmask_len) {
+                mask = parser->bitmask[block_idx];
+                if (bit > 0) mask &= ~((1U << bit) - 1);
             } else {
-                // Node
-                if (curr->is_null()) {
-                    if (is_array_idx) *curr = Json::array_t{}; else *curr = Json::object_t{};
+                mask = 0;
+            }
+        }
+
+        uint32_t next() {
+            while (true) {
+                if (mask != 0) {
+                    int bit = std::countr_zero(mask);
+                    uint32_t offset = block_idx * 32 + bit;
+                    mask &= (mask - 1);
+                    return offset;
                 }
-                if (curr->is_array()) {
-                     int idx = 0; std::from_chars(token.data(), token.data()+token.size(), idx);
-                     curr = &(*curr)[idx];
-                } else {
-                     curr = &(*curr)[token];
+                block_idx++;
+                if (block_idx >= parser->bitmask_len) return (uint32_t)-1;
+                mask = parser->bitmask[block_idx];
+            }
+        }
+    };
+
+    struct Value {
+        const Parser* parser;
+        uint32_t offset;
+
+        Value() : parser(nullptr), offset(0) {}
+        Value(const Parser* p, uint32_t o) : parser(p), offset(o) {}
+
+        bool is_valid() const { return parser != nullptr && offset < parser->len; }
+
+        char current_char() const {
+             const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+             if (s >= parser->base + parser->len) return 0;
+             return *s;
+        }
+
+        Type type() const {
+            char c = current_char();
+            if (c == '{') return Type::Object;
+            if (c == '[') return Type::Array;
+            if (c == '"') return Type::String;
+            if (c == 't') return Type::True;
+            if (c == 'f') return Type::False;
+            if (c == 'n') return Type::Null;
+            if ((c >= '0' && c <= '9') || c == '-') return Type::Number;
+            return Type::Null;
+        }
+
+        bool is_object() const { return type() == Type::Object; }
+        bool is_array() const { return type() == Type::Array; }
+        bool is_string() const { return type() == Type::String; }
+        bool is_number() const { return type() == Type::Number; }
+        bool is_bool() const { Type t = type(); return t == Type::True || t == Type::False; }
+        bool is_true() const { return type() == Type::True; }
+        bool is_false() const { return type() == Type::False; }
+        bool is_null() const { return type() == Type::Null; }
+
+        int get_int() const {
+            const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+            int i;
+            std::from_chars(s, parser->base + parser->len, i);
+            return i;
+        }
+
+        double get_double() const {
+            const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+            double d;
+            std::from_chars(s, parser->base + parser->len, d);
+            return d;
+        }
+
+        std::string_view get_string() const {
+            if (!is_string()) return {};
+            const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+            uint32_t start = (uint32_t)(s - parser->base);
+            Cursor c(parser, start + 1);
+            uint32_t end = c.next();
+            if (end == (uint32_t)-1) return {};
+            return std::string_view(parser->base + start + 1, end - start - 1);
+        }
+
+        void skip_container(Cursor& c, char open, char close) const {
+            int depth = 1;
+            while (depth > 0) {
+                uint32_t curr = c.next();
+                if (curr == (uint32_t)-1) break;
+                char ch = parser->base[curr];
+                if (ch == open) depth++;
+                else if (ch == close) depth--;
+                else if (ch == '"') c.next();
+            }
+        }
+
+        uint32_t size() const {
+            if (!is_array()) return 0;
+            const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+            uint32_t start = (uint32_t)(s - parser->base) + 1;
+
+            const char* check = ASM::skip_whitespace(parser->base + start, parser->base + parser->len);
+            if (*check == ']') return 0;
+
+            Cursor c(parser, start);
+            uint32_t commas = 0;
+            while (true) {
+                uint32_t curr = c.next();
+                if (curr == (uint32_t)-1) break;
+                char ch = parser->base[curr];
+                if (ch == ']') break;
+                if (ch == ',') commas++;
+                else if (ch == '{') skip_container(c, '{', '}');
+                else if (ch == '[') skip_container(c, '[', ']');
+                else if (ch == '"') c.next();
+            }
+            return commas + 1;
+        }
+
+        Value operator[](size_t idx) const {
+            if (!is_array()) return {};
+            const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+            uint32_t start = (uint32_t)(s - parser->base) + 1;
+
+            const char* check = ASM::skip_whitespace(parser->base + start, parser->base + parser->len);
+            if (*check == ']') return {};
+
+            Cursor c(parser, start);
+            size_t count = 0;
+            uint32_t element_start = start;
+
+            while (true) {
+                if (count == idx) return Value(parser, element_start);
+
+                while (true) {
+                    uint32_t curr = c.next();
+                    if (curr == (uint32_t)-1) return {};
+                    char ch = parser->base[curr];
+                    if (ch == ']') return {};
+                    if (ch == ',') {
+                        element_start = curr + 1;
+                        count++;
+                        break;
+                    }
+                    if (ch == '{') skip_container(c, '{', '}');
+                    else if (ch == '[') skip_container(c, '[', ']');
+                    else if (ch == '"') c.next();
                 }
             }
-            pos = dot + 1;
+            return {};
         }
-    }
-    return res;
-}
 
-// -----------------------------------------------------------------------------
-// Parser Implementation
-// -----------------------------------------------------------------------------
+        Value operator[](std::string_view key) const {
+            if (!is_object()) return {};
+             const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+            uint32_t start = (uint32_t)(s - parser->base) + 1;
 
-inline Json Parser::parse() {
-    m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
-    if (m_ptr >= m_end) return Json();
-    return parse_value();
-}
+            Cursor c(parser, start);
+            while (true) {
+                uint32_t curr = c.next();
+                if (curr == (uint32_t)-1) return {};
+                char ch = parser->base[curr];
+                if (ch == '}') return {};
+                if (ch == ',') continue;
 
-inline Json Parser::parse_value() {
-    char c = *m_ptr;
-    switch(c) {
-        case '{': return parse_object();
-        case '[': return parse_array();
-        case '"': return parse_string();
-        case 't': return parse_true();
-        case 'f': return parse_false();
-        case 'n': return parse_null();
-        default:
-            if (c == '-' || (c >= '0' && c <= '9')) return parse_number();
-            throw std::runtime_error(std::format("Unexpected char: {}", c));
-    }
-}
+                if (ch == '"') {
+                    uint32_t end_q = c.next();
+                    size_t k_len = end_q - curr - 1;
+                    std::string_view k(parser->base + curr + 1, k_len);
 
-inline Json Parser::parse_object() {
-    m_ptr++; // {
-    auto obj = std::make_shared<ObjectMap>();
-    m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
-    if (*m_ptr == '}') { m_ptr++; return Json(ObjectMap{}); }
+                    uint32_t colon = c.next();
 
-    while (true) {
-        if (*m_ptr != '"') throw std::runtime_error("Expected string key");
-        std::string key = parse_string_raw();
+                    if (k == key) {
+                        return Value(parser, colon + 1);
+                    }
 
-        m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
-        if (*m_ptr != ':') throw std::runtime_error("Expected :");
-        m_ptr++;
-        m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
+                    const char* v_s = ASM::skip_whitespace(parser->base + colon + 1, parser->base + parser->len);
+                    char v_ch = *v_s;
 
-        Json val = parse_value();
-        obj->m_data.emplace_back(std::move(key), std::move(val));
-
-        m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
-        if (*m_ptr == '}') { m_ptr++; break; }
-        if (*m_ptr == ',') { m_ptr++; m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end); continue; }
-        throw std::runtime_error("Expected } or ,");
-    }
-    obj->sort();
-    Json j; j.m_data = obj;
-    return j;
-}
-
-inline Json Parser::parse_array() {
-    m_ptr++; // [
-    auto arr = std::make_shared<std::vector<Json>>();
-    m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
-    if (*m_ptr == ']') { m_ptr++; return Json(std::vector<Json>{}); }
-
-    while(true) {
-        arr->push_back(parse_value());
-        m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end);
-        if (*m_ptr == ']') { m_ptr++; break; }
-        if (*m_ptr == ',') { m_ptr++; m_ptr = ASM::skip_whitespace_simd(m_ptr, m_end); continue; }
-        throw std::runtime_error("Expected ] or ,");
-    }
-    Json j; j.m_data = arr;
-    return j;
-}
-
-inline std::string Parser::parse_string_raw() {
-    m_ptr++; // "
-    const char* start = m_ptr;
-    while(m_ptr < m_end) {
-#if TACHYON_HAS_AVX2
-        // Safety check: ensure 32 bytes
-        if (m_ptr + 32 <= m_end) {
-            __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(m_ptr));
-            __m256i q = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('"'));
-            __m256i s = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('\\'));
-            int mask = _mm256_movemask_epi8(_mm256_or_si256(q, s));
-            if (mask) {
-                m_ptr += std::countr_zero((unsigned int)mask);
-                break;
+                    if (v_ch == '{') {
+                        uint32_t tmp = c.next(); skip_container(c, '{', '}');
+                    } else if (v_ch == '[') {
+                         uint32_t tmp = c.next(); skip_container(c, '[', ']');
+                    } else if (v_ch == '"') {
+                         uint32_t tmp = c.next(); c.next();
+                    }
+                }
             }
-            m_ptr += 32;
-            continue;
         }
-#endif
-        // Scalar fallback for tail or non-AVX
-        if (*m_ptr == '"' || *m_ptr == '\\') break;
-        m_ptr++;
-    }
 
-    if (m_ptr < m_end && *m_ptr == '"') {
-        std::string res(start, m_ptr - start);
-        m_ptr++;
-        return res;
-    }
+        template<typename T> T get() const {
+             if constexpr (std::is_same_v<T, bool>) return type() == Type::True;
+             else if constexpr (std::is_same_v<T, int>) return get_int();
+             else if constexpr (std::is_same_v<T, double>) return get_double();
+             else if constexpr (std::is_same_v<T, std::string_view>) return get_string();
+             else if constexpr (std::is_same_v<T, const char*>) return get_string().data();
+             else return T{};
+        }
 
-    // Escapes
-    std::string res;
-    res.append(start, m_ptr - start);
-    while (m_ptr < m_end) {
-        char c = *m_ptr++;
-        if (c == '"') return res;
-        if (c == '\\') {
-            char e = *m_ptr++;
-            switch(e) {
-                case '"': res += '"'; break;
-                case '\\': res += '\\'; break;
-                case '/': res += '/'; break;
-                case 'b': res += '\b'; break;
-                case 'f': res += '\f'; break;
-                case 'n': res += '\n'; break;
-                case 'r': res += '\r'; break;
-                case 't': res += '\t'; break;
-                case 'u': {
-                     // TODO: Proper Unicode
-                     m_ptr += 4;
-                     res += '?';
+        void dump(std::ostream& os) const {
+            Type t = type();
+            switch (t) {
+                case Type::Null: os << "null"; break;
+                case Type::True: os << "true"; break;
+                case Type::False: os << "false"; break;
+                case Type::Number: {
+                     double d = get_double();
+                     if (d == (int)d) os << (int)d;
+                     else os << d;
                      break;
                 }
-                default: res += e;
-            }
-        } else res += c;
-    }
-    throw std::runtime_error("Unterminated string");
-}
+                case Type::String: {
+                    os << '"' << get_string() << '"';
+                    break;
+                }
+                case Type::Array: {
+                    os << "[";
+                    const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+                    uint32_t start = (uint32_t)(s - parser->base) + 1;
 
-inline Json Parser::parse_string() { return Json(parse_string_raw()); }
-
-inline Json Parser::parse_number() {
-    const char* start = m_ptr;
-    bool is_float = false;
-    if (*m_ptr == '-') m_ptr++;
-    while (isdigit(*m_ptr)) m_ptr++;
-    if (*m_ptr == '.') { is_float = true; m_ptr++; while (isdigit(*m_ptr)) m_ptr++; }
-    if (*m_ptr == 'e' || *m_ptr == 'E') { is_float = true; m_ptr++; if(*m_ptr=='+'||*m_ptr=='-')m_ptr++; while(isdigit(*m_ptr))m_ptr++; }
-
-    std::string_view sv(start, m_ptr - start);
-    if (is_float) {
-        double v; std::from_chars(sv.data(), sv.data()+sv.size(), v);
-        return Json(v);
-    } else {
-        int64_t v; std::from_chars(sv.data(), sv.data()+sv.size(), v);
-        return Json(v);
-    }
-}
-
-inline Json Parser::parse_true() { m_ptr += 4; return Json(true); }
-inline Json Parser::parse_false() { m_ptr += 5; return Json(false); }
-inline Json Parser::parse_null() { m_ptr += 4; return Json(nullptr); }
-
-// -----------------------------------------------------------------------------
-// IO Implementation
-// -----------------------------------------------------------------------------
-
-inline Json Json::parse(std::string_view json, const ParseOptions& opts) {
-    Parser p(json, opts);
-    return p.parse();
-}
-
-inline void Json::dump_to(Buffer& buf, const DumpOptions& opts) const {
-    if (is_null()) { buf.append("null", 4); return; }
-    if (is_boolean()) {
-        if(get<bool>()) buf.append("true", 4); else buf.append("false", 5);
-        return;
-    }
-    if (is_number_int()) {
-        std::string s = std::to_string(get<int64_t>());
-        buf.append(s);
-        return;
-    }
-    if (is_number_float()) {
-        std::string s = std::to_string(get<double>());
-        buf.append(s);
-        return;
-    }
-    if (is_string()) {
-        buf.append('"');
-        const std::string& s = get<std::string>();
-        // Safe escaping
-        for (char c : s) {
-            switch(c) {
-                case '"': buf.append("\\\"", 2); break;
-                case '\\': buf.append("\\\\", 2); break;
-                case '\b': buf.append("\\b", 2); break;
-                case '\f': buf.append("\\f", 2); break;
-                case '\n': buf.append("\\n", 2); break;
-                case '\r': buf.append("\\r", 2); break;
-                case '\t': buf.append("\\t", 2); break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20) {
-                         // Hex escape (simplified)
-                         char hex[7];
-                         snprintf(hex, 7, "\\u%04x", c);
-                         buf.append(hex, 6);
-                    } else {
-                        buf.append(c);
+                    if (*(ASM::skip_whitespace(parser->base + start, parser->base + parser->len)) == ']') {
+                        os << "]"; return;
                     }
+
+                    Cursor c(parser, start);
+                    bool first = true;
+                    uint32_t el_start = start;
+
+                    while (true) {
+                        if (!first) os << ",";
+                        first = false;
+
+                        Value(parser, el_start).dump(os);
+
+                        while (true) {
+                            uint32_t curr = c.next();
+                            if (curr == (uint32_t)-1) break;
+                            char ch = parser->base[curr];
+                            if (ch == ']') goto end_arr;
+                            if (ch == ',') {
+                                el_start = curr + 1;
+                                break;
+                            }
+                            if (ch == '{') skip_container(c, '{', '}');
+                            else if (ch == '[') skip_container(c, '[', ']');
+                            else if (ch == '"') c.next();
+                        }
+                    }
+                    end_arr:
+                    os << "]";
+                    break;
+                }
+                case Type::Object: {
+                    os << "{";
+                    const char* s = ASM::skip_whitespace(parser->base + offset, parser->base + parser->len);
+                    uint32_t start = (uint32_t)(s - parser->base) + 1;
+                    Cursor c(parser, start);
+                    bool first = true;
+                    while (true) {
+                        uint32_t curr = c.next();
+                        if (curr == (uint32_t)-1) break;
+                        char ch = parser->base[curr];
+                        if (ch == '}') break;
+                        if (ch == ',') continue;
+
+                        if (ch == '"') {
+                            if (!first) os << ",";
+                            first = false;
+
+                            uint32_t end_q = c.next();
+                            size_t k_len = end_q - curr - 1;
+                            std::string_view k(parser->base + curr + 1, k_len);
+                            os << '"' << k << "\":";
+
+                            uint32_t colon = c.next();
+                            Value(parser, colon + 1).dump(os);
+
+                            const char* v_s = ASM::skip_whitespace(parser->base + colon + 1, parser->base + parser->len);
+                            char v_ch = *v_s;
+                            if (v_ch == '{') {
+                                uint32_t tmp = c.next(); skip_container(c, '{', '}');
+                            } else if (v_ch == '[') {
+                                uint32_t tmp = c.next(); skip_container(c, '[', ']');
+                            } else if (v_ch == '"') {
+                                uint32_t tmp = c.next(); c.next();
+                            }
+                        }
+                    }
+                    os << "}";
+                    break;
+                }
             }
         }
-        buf.append('"');
-        return;
-    }
-    if (is_array()) {
-        buf.append('[');
-        const auto& arr = *std::get<std::shared_ptr<array_t>>(m_data);
-        for (size_t i=0; i<arr.size(); ++i) {
-            arr[i].dump_to(buf, opts);
-            if (i < arr.size()-1) buf.append(',');
+    };
+
+    class Document {
+        Parser parser;
+        std::string storage;
+    public:
+        void parse(std::string json) {
+            storage = std::move(json);
+            parser.parse(storage.data(), storage.size());
         }
-        buf.append(']');
-        return;
-    }
-    if (is_object()) {
-        buf.append('{');
-        const auto& obj = *std::get<std::shared_ptr<object_t>>(m_data);
-        size_t i = 0;
-        for (const auto& [k, v] : obj) {
-            buf.append('"');
-            buf.append(k);
-            buf.append('"');
-            buf.append(':');
-            v.dump_to(buf, opts);
-            if (i < obj.size()-1) buf.append(',');
-            i++;
+        void parse_view(const char* data, size_t len) {
+            parser.parse(data, len);
         }
-        buf.append('}');
-        return;
-    }
+        Value root() const {
+            if (parser.len == 0) return Value();
+            return Value(&parser, 0);
+        }
+        void dump(std::ostream& os) const {
+            root().dump(os);
+        }
+    };
 }
-
-inline std::string Json::dump(const DumpOptions& opts) const {
-    Buffer buf;
-    dump_to(buf, opts);
-    return buf.str();
-}
-
-} // namespace Tachyon
-
-#endif // TACHYON_HPP
+#endif
