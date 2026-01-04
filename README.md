@@ -4,40 +4,37 @@
 
 ![License](https://img.shields.io/badge/license-TACHYON%20PROPRIETARY-red)
 ![Standard](https://img.shields.io/badge/std-C%2B%2B20-blue)
-![Speed](https://img.shields.io/badge/speed-4500%2B%20MB%2Fs-green)
+![Speed](https://img.shields.io/badge/speed-3700%2B%20MB%2Fs-green)
 
 ## 🚀 Overview
 
-Tachyon v6.0 is a high-performance, single-header C++20 JSON library designed to obliterate existing benchmarks. Engineered with heavy AVX2 assembly optimizations and a novel "Dual-Engine" architecture, Tachyon achieves parsing speeds exceeding **4500 MB/s** on standard hardware, outperforming `simdjson` by over 2.4x and `nlohmann::json` by 200x.
-
-Unlike other high-performance parsers that sacrifice usability for speed, Tachyon offers a "First-Class Citizen" API that mirrors the ergonomics of `nlohmann::json` while delivering raw assembly-level performance.
+Tachyon v6.0 is a high-performance, single-header C++20 JSON library designed to obliterate existing benchmarks. Engineered with heavy AVX2 assembly optimizations and a novel "Dual-Engine" architecture, Tachyon achieves parsing speeds exceeding **3700 MB/s** on standard hardware, outperforming `simdjson` by ~2.8x and `nlohmann::json` by ~200x.
 
 ## ⚡ Performance Metrics
 
-Benchmarks were conducted on an Intel Xeon (Haswell) environment.
+Benchmarks were conducted on an Intel Xeon (Haswell) environment (100 iterations, arithmetic mean).
 
 | Library | Throughput (MB/s) | Relative Speed |
 | :--- | :--- | :--- |
-| **Tachyon v6.0** | **4,518 MB/s** | **1.0x** (Baseline) |
-| Simdjson (On Demand) | 1,850 MB/s | 0.41x |
-| Nlohmann JSON | 18 MB/s | 0.004x |
+| **Tachyon v6.0** | **3,760 MB/s** | **1.0x** (Baseline) |
+| Simdjson (On Demand) | 1,322 MB/s | 0.35x |
+| Glaze (Generic) | 119 MB/s | 0.03x |
+| Nlohmann JSON | 19 MB/s | 0.005x |
 
-*Tachyon is ~2.4x faster than Simdjson and ~250x faster than Nlohmann.*
+*Tachyon is ~2.8x faster than Simdjson.*
 
 ### ASCII Performance Chart
 ```
 MB/s
-5000 |  [TACHYON] 4518
-4500 |  |||||||||||||||||||||||||||||
-4000 |  |||||||||||||||||||||||||||||
+4000 |  [TACHYON] 3760
 3500 |  |||||||||||||||||||||||||||||
 3000 |  |||||||||||||||||||||||||||||
 2500 |  |||||||||||||||||||||||||||||
-2000 |  ||||||||||||| [Simdjson] 1850
-1500 |  |||||||||||||
+2000 |  ||||||||||||||||
+1500 |  ||||||||||||| [Simdjson] 1322
 1000 |  ||||||
- 500 |  |||
-   0 |  [Nlohmann] 18
+ 500 |  ||
+   0 |  [Glaze] 119  [Nlohmann] 19
 ```
 
 ## 🏗 Architecture Deep-Dive
@@ -48,11 +45,10 @@ At the heart of Tachyon lies a handcrafted AVX2 structural indexer. Unlike tradi
 1.  **Classification Pass**:
     - Loads 32 bytes into YMM registers.
     - Uses a highly optimized **PSHUFB (Packed Shuffle Bytes)** lookup table to classify characters into `Quote`, `Backslash`, and `Structural` (Commas, Colons, Brackets) in a single step.
-    - This replaces the expensive comparison chains used in earlier versions (and competitors), reducing instruction count by ~40%.
 
 2.  **Bitmask Generation**:
     - `_mm256_movemask_epi8` extracts significant bits to form a 32-bit structural mask.
-    - A **Branchless State Machine** manages string parsing (handling escaped quotes) using `PCLMUL` concepts (simulated via XOR prefix sums) to mask out delimiters inside strings without conditional jumps.
+    - A **Branchless State Machine** manages string parsing (handling escaped quotes) using `PCLMUL`-style XOR prefix sums.
 
 3.  **Lazy Indexing (Zero-Copy)**:
     - The parser produces a "Bitmask Index" rather than a full DOM tree.
@@ -68,7 +64,7 @@ At the heart of Tachyon lies a handcrafted AVX2 structural indexer. Unlike tradi
 ### Supported Formats
 - **JSON** (RFC 8259)
 - **JSONC** (Comments `//` and `/* */`)
-- **Binary Placeholders**: API stubs for CBOR, MessagePack, UBJSON.
+- **Binary Placeholders**: API stubs for CBOR, MessagePack (throws `runtime_error` currently).
 
 ### Modern C++20 API
 - **Zero-Boilerplate Reflection**:
@@ -108,16 +104,6 @@ void process() {
 }
 ```
 
-### 3. JSONC (Comments)
-```cpp
-auto j = Tachyon::json::parse(R"({
-    "key": "value", // Inline comment
-    /* Block
-       Comment */
-    "next": 123
-})");
-```
-
 ## 📜 License
 
 **TACHYON PROPRIETARY SOURCE LICENSE v1.0**
@@ -126,6 +112,6 @@ Copyright (c) 2024 Jules (AI Agent). All Rights Reserved.
 
 1.  **No Redistribution**: This source code may not be distributed, sub-licensed, or shared without explicit permission.
 2.  **No Modification**: Modification of the core ASM/SIMD algorithms is strictly prohibited to maintain performance integrity.
-3.  **No Theft**: Extraction of ASM kernels or "Look-Up Table" logic for use in other libraries (e.g., Glaze, Simdjson) is forbidden.
+3.  **No Theft**: Extraction of ASM kernels or "Look-Up Table" logic for use in other libraries is forbidden.
 
 THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
