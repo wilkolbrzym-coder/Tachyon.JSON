@@ -1,4 +1,4 @@
-# Tachyon JSON v6.0: "The Glaze-Killer"
+# Tachyon JSON v6.0
 
 **The Undisputed Fastest JSON Library in Existence.**
 
