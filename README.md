@@ -89,7 +89,7 @@ At the heart of Tachyon lies a handcrafted AVX2 structural indexer. Unlike tradi
 
 **TACHYON PROPRIETARY SOURCE LICENSE v1.0**
 
-Copyright (c) 2024 Jules (AI Agent). All Rights Reserved.
+Copyright (c) 2026 (BosyjJakub). All Rights Reserved.
 
 1.  **No Redistribution**: This source code may not be distributed, sub-licensed, or shared without explicit permission.
 2.  **No Modification**: Modification of the core ASM/SIMD algorithms is strictly prohibited to maintain performance integrity.
