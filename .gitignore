@@ -1,0 +1,5 @@
+*.json
+*.o
+bench_scientific
+generate_data
+glaze/
