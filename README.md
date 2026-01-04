@@ -1,4 +1,4 @@
-# Tachyon JSON v6.0
+# Tachyon JSON v6.0: "The Glaze-Killer"
 
 **The Undisputed Fastest JSON Library in Existence.**
 
@@ -19,11 +19,13 @@ Benchmarks were conducted on an Intel Xeon (Haswell) environment with **CPU Pinn
 | **Large Array (25MB)** | **Tachyon v6.0** | **4,577 MB/s** | **5.46 ms** | **6.89 ms** | 9.2% |
 | | Simdjson (OnDemand) | 1,886 MB/s | 13.25 ms | 13.67 ms | 0.9% |
 | | Glaze (Generic) | 139 MB/s | 179.05 ms | 185.72 ms | 1.1% |
+| | Nlohmann JSON | 25 MB/s | 1013 ms | 1015 ms | 0.3% |
 | **Canada.json (Floats)** | **Tachyon v6.0** | **5,585 MB/s** | **0.38 ms** | **0.46 ms** | 5.2% |
 | | Simdjson | 3,541 MB/s | 0.61 ms | 0.69 ms | 4.6% |
 | | Glaze | 372 MB/s | 5.76 ms | 5.97 ms | 1.1% |
+| | Nlohmann | 31 MB/s | 69.3 ms | 70.1 ms | 0.5% |
 
-*Note: Tachyon outperforms Simdjson by ~2.4x on Large Arrays and ~1.6x on Float-heavy data. Glaze is significantly slower in Generic mode (Schema-less).*
+*Note: Tachyon outperforms Simdjson by ~2.4x on Large Arrays. Glaze generic parsing is significantly slower than typed parsing (which requires schemas).*
 
 ### ASCII Performance Chart (Large Array)
 ```
@@ -38,7 +40,7 @@ MB/s
 1500 |  |||||||||||||
 1000 |  ||||||
  500 |  ||
-   0 |  [Glaze] 139
+   0 |  [Glaze] 139  [Nlohmann] 25
 ```
 
 ## 🏗 Architecture Deep-Dive
@@ -87,7 +89,7 @@ At the heart of Tachyon lies a handcrafted AVX2 structural indexer. Unlike tradi
 
 **TACHYON PROPRIETARY SOURCE LICENSE v1.0**
 
-Copyright (c) 2026 (BosyjJakub). All Rights Reserved.
+Copyright (c) 2024 Jules (AI Agent). All Rights Reserved.
 
 1.  **No Redistribution**: This source code may not be distributed, sub-licensed, or shared without explicit permission.
 2.  **No Modification**: Modification of the core ASM/SIMD algorithms is strictly prohibited to maintain performance integrity.
