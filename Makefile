@@ -3,11 +3,18 @@ CXXFLAGS = -std=c++23 -O3 -march=native -flto -I. -Iglaze/include
 LDFLAGS =
 
 TARGET = bench_scientific
+TEST_TARGET = tests/unit_tests
 
-all: deps $(TARGET)
+all: deps $(TARGET) $(TEST_TARGET)
 
 $(TARGET): bench_scientific.cpp simdjson.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+test: $(TEST_TARGET)
+	@./$(TEST_TARGET)
+
+$(TEST_TARGET): tests/unit_tests.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $<
 
 simdjson.o: simdjson.cpp simdjson.h
 	$(CXX) $(CXXFLAGS) -c simdjson.cpp

@@ -432,6 +432,8 @@ namespace Tachyon {
 
         template<typename T> void get_to(T& t) const {
             if constexpr (std::is_same_v<T, int>) t = (int)as_int64();
+            else if constexpr (std::is_same_v<T, int64_t>) t = as_int64();
+            else if constexpr (std::is_same_v<T, double>) t = as_double();
             else if constexpr (std::is_same_v<T, bool>) t = as_bool();
             else if constexpr (std::is_same_v<T, std::string>) t = as_string();
             else from_json(*this, t);
@@ -514,6 +516,17 @@ namespace Tachyon {
              if (std::holds_alternative<int64_t>(value)) return std::get<int64_t>(value);
              if (std::holds_alternative<double>(value)) return (int64_t)std::get<double>(value);
              return 0;
+        }
+
+        double as_double() const {
+             if (is_lazy()) {
+                const auto& l = std::get<LazyNode>(value);
+                const char* s = ASM::skip_whitespace(l.base_ptr + l.offset, l.base_ptr + l.doc->len);
+                double d = 0.0; std::from_chars(s, l.base_ptr + l.doc->len, d, std::chars_format::general); return d;
+             }
+             if (std::holds_alternative<double>(value)) return std::get<double>(value);
+             if (std::holds_alternative<int64_t>(value)) return (double)std::get<int64_t>(value);
+             return 0.0;
         }
 
         bool as_bool() const {
@@ -609,7 +622,17 @@ namespace Tachyon {
             else if (c == 't') { value = true; }
             else if (c == 'f') { value = false; }
             else if (c == 'n') { value = std::monostate{}; }
-            else { value = as_int64(); }
+            else {
+                // Heuristic: check for float indicators in next few chars
+                bool is_float = false;
+                for(int k=0; k<32; ++k) {
+                    char ck = s[k];
+                    if (ck == ',' || ck == '}' || ck == ']' || ck == '\0') break;
+                    if (ck == '.' || ck == 'e' || ck == 'E') { is_float = true; break; }
+                }
+                if (is_float) value = as_double();
+                else value = as_int64();
+            }
         }
 
         json lazy_lookup(const std::string& key) const {
