@@ -333,6 +333,33 @@ namespace Tachyon {
             return res;
         }
 
+        static std::string escape_string(const std::string& s) {
+            std::string res = "\"";
+            res.reserve(s.size() + 4);
+            for (char c : s) {
+                switch (c) {
+                    case '"': res += "\\\""; break;
+                    case '\\': res += "\\\\"; break;
+                    case '\b': res += "\\b"; break;
+                    case '\f': res += "\\f"; break;
+                    case '\n': res += "\\n"; break;
+                    case '\r': res += "\\r"; break;
+                    case '\t': res += "\\t"; break;
+                    default:
+                        if ((unsigned char)c < 0x20) {
+                            char buf[7];
+                            std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                            res += buf;
+                        } else {
+                            res += c;
+                        }
+                        break;
+                }
+            }
+            res += "\"";
+            return res;
+        }
+
     public:
         json() : value(std::monostate{}) {}
         json(std::nullptr_t) : value(std::monostate{}) {}
@@ -506,7 +533,7 @@ namespace Tachyon {
 
         std::string dump() const {
             if (is_lazy()) { json c = *this; c.materialize(); return c.dump(); }
-            if (std::holds_alternative<std::string>(value)) return "\"" + std::get<std::string>(value) + "\"";
+            if (std::holds_alternative<std::string>(value)) return escape_string(std::get<std::string>(value));
             if (std::holds_alternative<int64_t>(value)) return std::to_string(std::get<int64_t>(value));
             if (std::holds_alternative<bool>(value)) return std::get<bool>(value) ? "true" : "false";
             if (std::holds_alternative<std::monostate>(value)) return "null";
@@ -514,7 +541,7 @@ namespace Tachyon {
                 std::string s = "{";
                 const auto& o = std::get<ObjectType>(value);
                 bool f = true;
-                for (const auto& [k, v] : o) { if (!f) s += ","; f = false; s += "\"" + k + "\":" + v.dump(); }
+                for (const auto& [k, v] : o) { if (!f) s += ","; f = false; s += escape_string(k) + ":" + v.dump(); }
                 s += "}";
                 return s;
             }
@@ -546,7 +573,8 @@ namespace Tachyon {
                     if (base[curr] == ',') continue;
                     if (base[curr] == '"') {
                         uint32_t end_q = cur.next();
-                        std::string k(base + curr + 1, end_q - curr - 1);
+                        std::string_view ksv(base + curr + 1, end_q - curr - 1);
+                        std::string k = unescape_string(ksv);
                         uint32_t colon = cur.next();
                         const char* vs = ASM::skip_whitespace(base + colon + 1, base + l.doc->len);
                         json child(LazyNode{l.doc, (uint32_t)(vs - base), base});
@@ -562,107 +590,18 @@ namespace Tachyon {
                  ArrayType arr;
                  uint32_t start = (uint32_t)(s - base) + 1;
                  Cursor cur(l.doc.get(), start, base);
-                 // We must manually scan the array elements because Cursor skips primitives
-                 // But Cursor tells us where delimiters are.
-                 // Elements are between (start/comma) and (comma/end).
-                 // However, primitives (123) are not in cursor.
-                 // We iterate until ']'.
-                 // The 'Cursor' approach for Arrays is hard if we don't have bitmask for primitives.
-                 // But we have commas in bitmask.
-                 // So we can find start of next element after comma.
-
-                 // Initial pos
-                 const char* p = s + 1; // After [
-                 p = ASM::skip_whitespace(p, base + l.doc->len);
-                 if (*p == ']') { value = std::move(arr); return; }
-
-                 // If array is [1, 2], Cursor has bits for Comma?
-                 // Yes.
-                 // So we can use Cursor to find commas.
-                 // But we need to handle nested containers.
-
-                 // Reset cursor to start of array content
-                 // Cursor c(l.doc.get(), (uint32_t)(p - base), base); -- unsafe if p is not structural
-                 // We need to use 'cur' which is already initialized?
-                 // No, 'cur' passed start=(s-base)+1.
-
-                 // Loop:
-                 // 1. We are at start of element (p).
-                 // 2. Create LazyNode for element at p.
-                 // 3. Skip element to find next delimiter (comma or ]).
-                 //    If element is primitive: next delimiter is next structural char (comma or ]).
-                 //    If element is container: skip_container finds matching close. Then next is comma or ].
-                 //    If element is string: next is comma or ].
-
-                 // To skip properly, we check type of *p.
+                 const char* p = s + 1;
                  while (true) {
                      p = ASM::skip_whitespace(p, base + l.doc->len);
                      if (*p == ']') break;
-
                      arr.push_back(json(LazyNode{l.doc, (uint32_t)(p - base), base}));
-
                      char ch = *p;
-                     if (ch == '{') {
-                         // We need a cursor at p+1 to skip
-                         Cursor skipC(l.doc.get(), (uint32_t)(p - base) + 1, base);
-                         skip_container(skipC, base, '{', '}');
-                         // skipC advanced to closing }.
-                         // We need to find NEXT structural after }.
-                         // The loop below will use main cursor?
-                         // We can't easily sync multiple cursors.
-                         // But we know the end of container.
-                         // We need to find the comma after it.
-                     }
-                     // This complexity suggests implementing "Lazy Array Materialization" using just the bitmask is tricky without a linear scan or a robust cursor.
-                     // Simplification: Use `lazy_index` logic repeated?
-                     // Or just rely on the fact that we can call `lazy_index`?
-                     // No, that's O(N^2).
-
-                     // Optimized approach:
-                     // Use one cursor.
-                     // Current element starts at `pos`.
-                     // Find next comma or ].
-                     // If we hit `{` or `[`, use `skip_container` logic on the SAME cursor.
-                     // If we hit `"`, skip string.
-                     // If we hit primitive, just `cur.next()` (which will find the comma/]).
-
-                     // We need `cur` to be positioned at or before `p`.
-                     // `start` was `s-base+1`.
-                     // If `p` is 123. `cur` (at start) points to first structural char (comma).
-                     // `cur.next()` gives comma.
-
-                     // Logic:
-                     // 1. Push element at `p`.
-                     // 2. Advance `p` to next element.
-                     //    Check `ch`.
-                     //    If `{`, `skip_container`. `cur` is now at `}`. `cur.next()` is comma/].
-                     //    If `[`, `skip_container`. `cur` at `]`.
-                     //    If `"`, `cur.next(); cur.next()`. `cur` at closing quote. `cur.next()` is comma/].
-                     //    If primitive (none of above), `cur` is *before* the comma (it hasn't moved past it).
-                     //      So `cur.next()` gives the comma.
-
-                     // WAIT. `cur` must be synchronized.
-                     // `cur` tracks the *next* structural char to return via `next()`.
-                     // If we have `[1, 2]`.
-                     // `cur` init at `1`.
-                     // Bitmask has `,` and `]`.
-                     // `ch`='1'. Primitive.
-                     // We do NOTHING to `cur`.
-                     // `uint32_t next_delim = cur.next();` -> returns offset of `,`.
-                     // Check `base[next_delim]`. If `,`, `p` = `next_delim + 1`. Loop.
-                     // If `]`, Break.
-
                      uint32_t next_delim;
                      if (ch == '{') { skip_container(cur, base, '{', '}'); next_delim = cur.next(); }
                      else if (ch == '[') { skip_container(cur, base, '[', ']'); next_delim = cur.next(); }
                      else if (ch == '"') { cur.next(); cur.next(); next_delim = cur.next(); }
-                     else {
-                         // Primitive
-                         next_delim = cur.next();
-                     }
-
+                     else { next_delim = cur.next(); }
                      if (next_delim == (uint32_t)-1 || base[next_delim] == ']') break;
-                     // It must be comma
                      p = base + next_delim + 1;
                  }
                  value = std::move(arr);
@@ -702,31 +641,21 @@ namespace Tachyon {
             const auto& l = std::get<LazyNode>(value);
             const char* base = l.base_ptr;
             const char* s = ASM::skip_whitespace(base + l.offset, base + l.doc->len);
-
-            // Should be [
             if (*s != '[') return json();
-
             uint32_t start = (uint32_t)(s - base) + 1;
             Cursor c(l.doc.get(), start, base);
-
             size_t count = 0;
-            const char* p = s + 1; // Start of first element
-
-            // Loop to skip elements
-            // Similar logic to materialize but we don't store
+            const char* p = s + 1;
             while (true) {
                 p = ASM::skip_whitespace(p, base + l.doc->len);
-                if (*p == ']') return json(); // Index out of bounds
-
+                if (*p == ']') return json();
                 if (count == idx) return json(LazyNode{l.doc, (uint32_t)(p - base), base});
-
                 char ch = *p;
                 uint32_t next_delim;
                 if (ch == '{') { skip_container(c, base, '{', '}'); next_delim = c.next(); }
                 else if (ch == '[') { skip_container(c, base, '[', ']'); next_delim = c.next(); }
                 else if (ch == '"') { c.next(); c.next(); next_delim = c.next(); }
                 else { next_delim = c.next(); }
-
                 count++;
                 if (next_delim == (uint32_t)-1 || base[next_delim] == ']') return json();
                 p = base + next_delim + 1;
@@ -738,41 +667,18 @@ namespace Tachyon {
             const char* base = l.base_ptr;
             const char* s = ASM::skip_whitespace(base + l.offset, base + l.doc->len);
             if (*s != '[') return 0;
-
-            // Check empty
             const char* p = ASM::skip_whitespace(s + 1, base + l.doc->len);
             if (*p == ']') return 0;
-
-            // Iterate commas
             uint32_t start = (uint32_t)(s - base) + 1;
             Cursor c(l.doc.get(), start, base);
-            size_t count = 1; // At least one if not empty
-
+            size_t count = 1;
             while (true) {
-                // We just need to skip containers/strings and count commas at top level
-                // Actually, `c.next()` will return ALL commas at current level?
-                // No, Cursor returns ALL structural chars (nested included).
-                // So we MUST use `skip_container`.
-
-                // We scan elements.
-                // We don't need 'p' pointer value, just `ch`.
-                // But `ch` is needed to decide skip.
-                // `cur` position is not enough, we need to know what `cur` points to?
-                // No, `cur` points to delimiters. We need to know what starts the value.
-                // We need `p`.
-
-                // Reuse logic from lazy_index but just count.
-                // ...
-                // Optimization: Just scan bitmask?
-                // No, nested commas exist.
-
                 char ch = *p;
                 uint32_t next_delim;
                 if (ch == '{') { skip_container(c, base, '{', '}'); next_delim = c.next(); }
                 else if (ch == '[') { skip_container(c, base, '[', ']'); next_delim = c.next(); }
                 else if (ch == '"') { c.next(); c.next(); next_delim = c.next(); }
                 else { next_delim = c.next(); }
-
                 if (next_delim == (uint32_t)-1 || base[next_delim] == ']') break;
                 if (base[next_delim] == ',') count++;
                 p = ASM::skip_whitespace(base + next_delim + 1, base + l.doc->len);

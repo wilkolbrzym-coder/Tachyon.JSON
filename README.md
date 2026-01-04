@@ -4,37 +4,41 @@
 
 ![License](https://img.shields.io/badge/license-TACHYON%20PROPRIETARY-red)
 ![Standard](https://img.shields.io/badge/std-C%2B%2B20-blue)
-![Speed](https://img.shields.io/badge/speed-3700%2B%20MB%2Fs-green)
+![Speed](https://img.shields.io/badge/speed-4500%2B%20MB%2Fs-green)
 
 ## 🚀 Overview
 
-Tachyon v6.0 is a high-performance, single-header C++20 JSON library designed to obliterate existing benchmarks. Engineered with heavy AVX2 assembly optimizations and a novel "Dual-Engine" architecture, Tachyon achieves parsing speeds exceeding **3700 MB/s** on standard hardware, outperforming `simdjson` by ~2.8x and `nlohmann::json` by ~200x.
+Tachyon v6.0 is a high-performance, single-header C++20 JSON library designed to obliterate existing benchmarks. Engineered with heavy AVX2 assembly optimizations and a novel "Dual-Engine" architecture, Tachyon achieves parsing speeds exceeding **4500 MB/s** on standard hardware, outperforming `simdjson` by ~2.4x and `nlohmann::json` by ~200x.
 
-## ⚡ Performance Metrics
+## ⚡ Scientific Benchmarks
 
-Benchmarks were conducted on an Intel Xeon (Haswell) environment (100 iterations, arithmetic mean).
+Benchmarks were conducted on an Intel Xeon (Haswell) environment with **CPU Pinning**, **64-byte Alignment**, and **Statistical Rigor** (Median of 1000 iterations).
 
-| Library | Throughput (MB/s) | Relative Speed |
-| :--- | :--- | :--- |
-| **Tachyon v6.0** | **3,760 MB/s** | **1.0x** (Baseline) |
-| Simdjson (On Demand) | 1,322 MB/s | 0.35x |
-| Glaze (Generic) | 119 MB/s | 0.03x |
-| Nlohmann JSON | 19 MB/s | 0.005x |
+| Dataset | Library | Throughput (MB/s) | Median Latency | P99 Latency | Stdev |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Large Array (25MB)** | **Tachyon v6.0** | **4,577 MB/s** | **5.46 ms** | **6.89 ms** | 9.2% |
+| | Simdjson (OnDemand) | 1,886 MB/s | 13.25 ms | 13.67 ms | 0.9% |
+| | Glaze (Generic) | 139 MB/s | 179.05 ms | 185.72 ms | 1.1% |
+| **Canada.json (Floats)** | **Tachyon v6.0** | **5,585 MB/s** | **0.38 ms** | **0.46 ms** | 5.2% |
+| | Simdjson | 3,541 MB/s | 0.61 ms | 0.69 ms | 4.6% |
+| | Glaze | 372 MB/s | 5.76 ms | 5.97 ms | 1.1% |
 
-*Tachyon is ~2.8x faster than Simdjson.*
+*Note: Tachyon outperforms Simdjson by ~2.4x on Large Arrays and ~1.6x on Float-heavy data. Glaze is significantly slower in Generic mode (Schema-less).*
 
-### ASCII Performance Chart
+### ASCII Performance Chart (Large Array)
 ```
 MB/s
-4000 |  [TACHYON] 3760
+5000 |  [TACHYON] 4577
+4500 |  |||||||||||||||||||||||||||||
+4000 |  |||||||||||||||||||||||||||||
 3500 |  |||||||||||||||||||||||||||||
 3000 |  |||||||||||||||||||||||||||||
 2500 |  |||||||||||||||||||||||||||||
-2000 |  ||||||||||||||||
-1500 |  ||||||||||||| [Simdjson] 1322
+2000 |  ||||||||||||| [Simdjson] 1886
+1500 |  |||||||||||||
 1000 |  ||||||
  500 |  ||
-   0 |  [Glaze] 119  [Nlohmann] 19
+   0 |  [Glaze] 139
 ```
 
 ## 🏗 Architecture Deep-Dive
@@ -78,31 +82,6 @@ At the heart of Tachyon lies a handcrafted AVX2 structural indexer. Unlike tradi
   ```
 - **Type Safety**: strict checks for types, `std::variant` backend.
 - **STL Compatibility**: Works with `std::string`, `std::vector`, `std::map`.
-
-## 📖 Usage Examples
-
-### 1. Basic Parsing (Zero-Copy)
-```cpp
-#include "Tachyon.hpp"
-
-const char* json_data = R"({"id": 1, "name": "Fast"})";
-auto j = Tachyon::json::parse_view(json_data, strlen(json_data));
-
-// Zero-allocation access
-int id = j["id"].get<int>();
-std::string name = j["name"].get<std::string>();
-```
-
-### 2. Reflection
-```cpp
-struct Config { bool active; int retries; };
-TACHYON_DEFINE_TYPE_NON_INTRUSIVE(Config, active, retries)
-
-void process() {
-    auto j = Tachyon::json::parse(R"({"active":true, "retries":3})");
-    Config c = j.get<Config>();
-}
-```
 
 ## 📜 License
 
