@@ -87,23 +87,32 @@ Stats calculate_stats(std::vector<double>& times_sec, size_t bytes) {
 
 template <typename Func>
 Stats run_bench(const std::string& name, const std::string& data, Func&& f, int iterations = 1000) {
-    // Warmup (Adaptive)
-    int warmup = iterations / 2;
-    for (int i = 0; i < warmup; ++i) {
-        f();
-    }
+    // Run 3 times, report MAX speed (Minimum Median Time)
+    Stats best_stats = {0, 0, 0, 0};
 
-    // Measure
-    std::vector<double> times;
-    times.reserve(iterations);
-    for (int i = 0; i < iterations; ++i) {
-        auto start = std::chrono::high_resolution_clock::now();
-        f();
-        auto end = std::chrono::high_resolution_clock::now();
-        times.push_back(std::chrono::duration<double>(end - start).count());
-    }
+    for (int run = 0; run < 3; ++run) {
+        // Warmup (Adaptive)
+        int warmup = iterations / 2;
+        for (int i = 0; i < warmup; ++i) {
+            f();
+        }
 
-    return calculate_stats(times, data.size());
+        // Measure
+        std::vector<double> times;
+        times.reserve(iterations);
+        for (int i = 0; i < iterations; ++i) {
+            auto start = std::chrono::high_resolution_clock::now();
+            f();
+            auto end = std::chrono::high_resolution_clock::now();
+            times.push_back(std::chrono::duration<double>(end - start).count());
+        }
+
+        Stats current = calculate_stats(times, data.size());
+        if (current.mb_s > best_stats.mb_s) {
+            best_stats = current;
+        }
+    }
+    return best_stats;
 }
 
 int main() {
@@ -134,7 +143,7 @@ int main() {
             doc.parse_view(ds.data.data(), ds.data.size());
             auto stats = run_bench(ds.name + " Tachyon", ds.data, [&]() {
                 doc.parse_view(ds.data.data(), ds.data.size());
-                do_not_optimize(doc.bitmask.get());
+                do_not_optimize(doc.bitmask_ptr);
             }, 1000);
             std::cout << "| " << ds.name << " | Tachyon | " << std::fixed << std::setprecision(2) << stats.mb_s << " | " << std::setprecision(5) << stats.median << " | " << stats.p99 << " | " << std::setprecision(2) << stats.stdev_pct << " |" << std::endl;
         }

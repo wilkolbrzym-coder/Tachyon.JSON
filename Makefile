@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++23 -O3 -march=native -flto -I. -Iglaze/include
+CXXFLAGS = -std=c++23 -O3 -march=native -flto -DNDEBUG -I. -Iglaze/include
 LDFLAGS =
 
 TARGET = bench_scientific
@@ -7,14 +7,14 @@ TEST_TARGET = tests/unit_tests
 
 all: deps $(TARGET) $(TEST_TARGET)
 
-$(TARGET): bench_scientific.cpp simdjson.o
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+$(TARGET): bench_scientific.cpp simdjson.o Tachyon.hpp
+	$(CXX) $(CXXFLAGS) -o $@ bench_scientific.cpp simdjson.o $(LDFLAGS)
 
 test: $(TEST_TARGET)
 	@./$(TEST_TARGET)
 
-$(TEST_TARGET): tests/unit_tests.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $<
+$(TEST_TARGET): tests/unit_tests.cpp Tachyon.hpp
+	$(CXX) $(CXXFLAGS) -o $@ tests/unit_tests.cpp
 
 simdjson.o: simdjson.cpp simdjson.h
 	$(CXX) $(CXXFLAGS) -c simdjson.cpp
