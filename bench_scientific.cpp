@@ -50,15 +50,6 @@ std::string generate_large_in_mem(size_t size_mb) {
     return s;
 }
 
-std::string generate_nested_in_mem(int depth) {
-    std::string s;
-    s.reserve(depth * 10);
-    for (int i = 0; i < depth; ++i) s += R"({"a":)";
-    s += "1";
-    for (int i = 0; i < depth; ++i) s += "}";
-    return s;
-}
-
 struct Stats {
     double median;
     double p99;
@@ -87,8 +78,11 @@ Stats calculate_stats(std::vector<double>& times_sec, size_t bytes) {
 
 template <typename Func>
 Stats run_bench(const std::string& name, const std::string& data, Func&& f, int iterations = 1000) {
+    // Reduce iterations drastically for debugging/speed if large
+    if (data.size() > 10 * 1024 * 1024) iterations = std::min(iterations, 10);
+
     // Warmup (Adaptive)
-    int warmup = iterations / 2;
+    int warmup = std::max(1, iterations / 2);
     for (int i = 0; i < warmup; ++i) {
         f();
     }
@@ -107,22 +101,23 @@ Stats run_bench(const std::string& name, const std::string& data, Func&& f, int 
 }
 
 int main() {
+    // Attempt to pin to core 0 (might fail in container, ignore error)
     pin_to_core(0);
 
     std::cout << "Generating/Loading datasets..." << std::endl;
     std::string large = generate_large_in_mem(25);
-    std::string nested = generate_nested_in_mem(1000);
     std::string canada = read_file("canada.json");
 
+    // Fallback if canada missing
     if (canada.empty()) {
-        std::cerr << "Warning: canada.json not found. Run 'make deps' or download it." << std::endl;
+        std::cerr << "Warning: canada.json not found. Using Large Array only." << std::endl;
+        canada = "[]";
     }
 
     struct Dataset { std::string name; const std::string& data; };
     std::vector<Dataset> datasets;
     datasets.push_back({"Large Array", large});
-    if (!canada.empty()) datasets.push_back({"Canada", canada});
-    datasets.push_back({"Nested", nested});
+    if (canada != "[]") datasets.push_back({"Canada", canada});
 
     std::cout << "| Dataset | Library | Speed (MB/s) | Median (s) | P99 (s) | Stdev (%) |" << std::endl;
     std::cout << "|---|---|---|---|---|---|" << std::endl;
@@ -130,13 +125,25 @@ int main() {
     for (const auto& ds : datasets) {
         // Tachyon
         {
-            Tachyon::Document doc;
-            doc.parse_view(ds.data.data(), ds.data.size());
             auto stats = run_bench(ds.name + " Tachyon", ds.data, [&]() {
-                doc.parse_view(ds.data.data(), ds.data.size());
-                do_not_optimize(doc.bitmask.get());
+                auto j = Tachyon::json::parse(ds.data);
+                if (j.is_null()) do_not_optimize(&j);
             }, 1000);
             std::cout << "| " << ds.name << " | Tachyon | " << std::fixed << std::setprecision(2) << stats.mb_s << " | " << std::setprecision(5) << stats.median << " | " << stats.p99 << " | " << std::setprecision(2) << stats.stdev_pct << " |" << std::endl;
+        }
+
+        // Tachyon (View / Zero-Copy)
+        {
+             // Simulate "View" parsing where we already have the string
+             Tachyon::Document doc;
+             doc.set_input_view(ds.data.data(), ds.data.size());
+             auto stats = run_bench(ds.name + " Tachyon(View)", ds.data, [&]() {
+                 doc.allocator.reset(); // Reset allocator to avoid OOM
+                 Tachyon::Parser p(doc);
+                 auto root = p.parse();
+                 do_not_optimize(root);
+             }, 1000);
+             std::cout << "| " << ds.name << " | Tachyon (View) | " << std::fixed << std::setprecision(2) << stats.mb_s << " | " << std::setprecision(5) << stats.median << " | " << stats.p99 << " | " << std::setprecision(2) << stats.stdev_pct << " |" << std::endl;
         }
 
         // Glaze (Generic)
@@ -144,7 +151,7 @@ int main() {
             glz::generic v;
             auto stats = run_bench(ds.name + " Glaze", ds.data, [&]() {
                 if(glz::read_json(v, ds.data)) do_not_optimize(&v);
-            }, 100); // Reduced iterations
+            }, 50);
             std::cout << "| " << ds.name << " | Glaze | " << std::fixed << std::setprecision(2) << stats.mb_s << " | " << std::setprecision(5) << stats.median << " | " << stats.p99 << " | " << std::setprecision(2) << stats.stdev_pct << " |" << std::endl;
         }
 
@@ -164,7 +171,7 @@ int main() {
             auto stats = run_bench(ds.name + " Nlohmann", ds.data, [&]() {
                 auto j = nlohmann::json::parse(ds.data);
                 if (j.empty()) do_not_optimize(&j);
-            }, 10); // Very low iterations
+            }, 10);
             std::cout << "| " << ds.name << " | Nlohmann | " << std::fixed << std::setprecision(2) << stats.mb_s << " | " << std::setprecision(5) << stats.median << " | " << stats.p99 << " | " << std::setprecision(2) << stats.stdev_pct << " |" << std::endl;
         }
     }

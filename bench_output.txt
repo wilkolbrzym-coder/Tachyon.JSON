@@ -1,0 +1,3 @@
+Generating/Loading datasets...
+| Dataset | Library | Speed (MB/s) | Median (s) | P99 (s) | Stdev (%) |
+|---|---|---|---|---|---|
