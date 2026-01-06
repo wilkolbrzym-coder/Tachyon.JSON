@@ -229,7 +229,10 @@ namespace Tachyon {
             return doc->base[bit_index];
         }
 
-        bool is_null() const { return get_char() == 'n'; }
+        bool is_null() const {
+            char c = get_char();
+            return c == 'n' || c == 0;
+        }
         bool is_object() const { return get_char() == '{'; }
         bool is_array() const { return get_char() == '['; }
         bool is_string() const { return get_char() == '"'; }
