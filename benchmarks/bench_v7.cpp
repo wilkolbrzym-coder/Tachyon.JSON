@@ -1,4 +1,4 @@
-#include "Tachyon.hpp"
+#include "../include/Tachyon.hpp"
 #include <iostream>
 #include <chrono>
 #include <vector>
@@ -8,13 +8,13 @@
 
 // Mock Simdjson if not present
 #ifdef __has_include
-#if __has_include("simdjson.h")
-#include "simdjson.h"
+#if __has_include("../include/simdjson.h")
+#include "../include/simdjson.h"
 #else
-namespace simdjson { class dom { public: class parser { public: int parse(const std::string&, const char*) { return 0; } }; }; }
+namespace simdjson { class dom { public: class parser { public: struct res { int error() { return 0; } }; res parse(const std::string&) { return {}; } }; }; }
 #endif
 #else
-namespace simdjson { class dom { public: class parser { public: int parse(const std::string&, const char*) { return 0; } }; }; }
+namespace simdjson { class dom { public: class parser { public: struct res { int error() { return 0; } }; res parse(const std::string&) { return {}; } }; }; }
 #endif
 
 // Mock Nlohmann if not present
@@ -50,38 +50,50 @@ int main(int argc, char** argv) {
 
     std::cout << "Benchmarking " << filename << " (" << data.size() / 1024.0 / 1024.0 << " MB)\n";
 
-    // Warmup
-    Tachyon::Document doc;
-    doc.parse(data);
+    int iterations = 100;
 
     // Tachyon Benchmark
-    auto start = high_resolution_clock::now();
-    int iterations = 100;
-    uint64_t checksum = 0;
-    for (int i = 0; i < iterations; ++i) {
+    {
+        Tachyon::Document doc; // Re-use buffer to measure throughput
+        // Warmup
         doc.parse(data);
-        // Verify results with Checksum to prevent DCE
-        for(size_t j=0; j<doc.tape_len; ++j) checksum += doc.tape[j];
-    }
-    auto end = high_resolution_clock::now();
-    std::chrono::duration<double> diff = end - start;
-    double duration = diff.count();
-    double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / duration;
 
-    std::cout << "Tachyon v7.0: " << std::fixed << std::setprecision(2) << gb_s << " GB/s (Checksum: " << checksum << ")\n";
+        auto start = high_resolution_clock::now();
+        uint64_t checksum = 0;
+        for (int i = 0; i < iterations; ++i) {
+            doc.parse(data);
+            // Verify results with Checksum to prevent DCE
+            // Fast loop over tape
+            uint64_t* t = doc.tape;
+            size_t n = doc.tape_len;
+            for(size_t j=0; j<n; ++j) checksum += t[j];
+        }
+        auto end = high_resolution_clock::now();
+        std::chrono::duration<double> diff = end - start;
+        double duration = diff.count();
+        double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / duration;
+
+        std::cout << "Tachyon v7.0: " << std::fixed << std::setprecision(2) << gb_s << " GB/s (Checksum: " << checksum << ")\n";
+    }
 
     // Simdjson Benchmark
 #if defined(SIMDJSON_H) || defined(SIMDJSON_HPP)
-    simdjson::dom::parser parser;
-    start = high_resolution_clock::now();
-    for (int i = 0; i < iterations; ++i) {
-        auto error = parser.parse(data).error();
-        (void)error;
+    {
+        simdjson::dom::parser parser;
+        // Warmup
+        auto result = parser.parse(data);
+
+        auto start = high_resolution_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+            auto error = parser.parse(data).error();
+            if (error) { std::cerr << "Simdjson error\n"; break; }
+        }
+        auto end = high_resolution_clock::now();
+        std::chrono::duration<double> diff = end - start;
+        double duration = diff.count();
+        double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / duration;
+        std::cout << "Simdjson:     " << gb_s << " GB/s\n";
     }
-    end = high_resolution_clock::now();
-    duration = duration_cast<duration<double>>(end - start).count();
-    gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / duration;
-    std::cout << "Simdjson:     " << gb_s << " GB/s\n";
 #endif
 
     return 0;
