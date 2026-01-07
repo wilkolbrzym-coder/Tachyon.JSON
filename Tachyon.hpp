@@ -1,7 +1,7 @@
 #ifndef TACHYON_HPP
 #define TACHYON_HPP
 
-// Tachyon JSON Library v6.0
+// Tachyon JSON Library v7.0
 // The World's Fastest JSON Library
 
 #include <iostream>
