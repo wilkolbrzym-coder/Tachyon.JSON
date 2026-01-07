@@ -71,95 +71,97 @@ TACHYON_FORCE_INLINE const char* parse_double_saturated(const char* p, double& o
     bool neg = false;
     if (*p == '-') { neg = true; ++p; }
 
-    uint64_t mantissa = 0;
+    uint64_t i_val = 0;
     int exponent = 0;
-    int digits_processed = 0;
+    static const uint64_t pow10_64[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
 
-    {
-        uint64_t chunk; memcpy(&chunk, p, 8);
-        uint64_t val = chunk - 0x3030303030303030ULL;
-        uint64_t has_non_digit = (val + 0x7676767676767676ULL) | val;
-        has_non_digit &= 0x8080808080808080ULL;
+    // 1. INTEGER PART (Load 16 bytes at once)
+    __m128i v = _mm_loadu_si128((const __m128i*)p);
+    __m128i v0 = _mm_set1_epi8('0');
+    __m128i v9 = _mm_set1_epi8('9');
 
-        if (has_non_digit == 0) {
-            mantissa = parse_8_digits(chunk);
-            p += 8;
-            digits_processed += 8;
+    // Mask: find first non-digit
+    uint32_t mask = _mm_movemask_epi8(_mm_or_si128(_mm_cmplt_epi8(v, v0), _mm_cmpgt_epi8(v, v9)));
+    int len = (mask == 0) ? 16 : count_trailing_zeros(mask);
 
-            memcpy(&chunk, p, 8);
-            val = chunk - 0x3030303030303030ULL;
-            has_non_digit = (val + 0x7676767676767676ULL) | val;
-            has_non_digit &= 0x8080808080808080ULL;
+    if (len > 0) {
+        uint64_t chunk_lo, chunk_hi;
+        memcpy(&chunk_lo, p, 8);
+        memcpy(&chunk_hi, p + 8, 8);
 
-            if (has_non_digit == 0) {
-                mantissa = mantissa * 100000000ULL + parse_8_digits(chunk);
-                p += 8;
-                digits_processed += 8;
-                while ((unsigned char)(*p - '0') <= 9) {
-                    if (digits_processed < 19) {
-                        mantissa = mantissa * 10 + (*p - '0');
-                        digits_processed++;
-                    } else {
-                        exponent++;
-                    }
-                    p++;
-                }
-            } else {
-                while ((unsigned char)(*p - '0') <= 9) {
-                    mantissa = mantissa * 10 + (*p - '0');
-                    digits_processed++;
-                    p++;
-                }
-            }
+        // Zero out garbage bits
+        if (len < 8) chunk_lo &= ((1ULL << (len * 8)) - 1);
+        if (len < 16) chunk_hi &= ((1ULL << ((len - 8) * 8)) - 1);
+
+        if (len <= 8) {
+            i_val = parse_8_digits(chunk_lo) / pow10_64[8 - len];
         } else {
-            while ((unsigned char)(*p - '0') <= 9) {
-                mantissa = mantissa * 10 + (*p - '0');
-                digits_processed++;
-                p++;
-            }
+            i_val = parse_8_digits(chunk_lo) * 100000000ULL + (parse_8_digits(chunk_hi) / pow10_64[16 - len]);
         }
     }
+    p += len;
 
+    // FAST SKIP: If number continues, just skip digits (Saturation)
+    while ((unsigned char)(*p - '0') <= 9) { p++; exponent++; }
+
+    // 2. FRACTIONAL PART
     if (*p == '.') {
         ++p;
-        while ((unsigned char)(*p - '0') <= 9) {
-            if (digits_processed < 19) {
-                mantissa = mantissa * 10 + (*p - '0');
-                digits_processed++;
-                exponent--;
+        v = _mm_loadu_si128((const __m128i*)p);
+        mask = _mm_movemask_epi8(_mm_or_si128(_mm_cmplt_epi8(v, v0), _mm_cmpgt_epi8(v, v9)));
+        int f_len = (mask == 0) ? 16 : count_trailing_zeros(mask);
+
+        uint64_t f_val = 0;
+        if (f_len > 0) {
+            uint64_t chunk_lo, chunk_hi;
+            memcpy(&chunk_lo, p, 8);
+            memcpy(&chunk_hi, p + 8, 8);
+
+            if (f_len < 8) chunk_lo &= ((1ULL << (f_len * 8)) - 1);
+            if (f_len < 16) chunk_hi &= ((1ULL << ((f_len - 8) * 8)) - 1);
+
+            if (f_len <= 8) {
+                f_val = parse_8_digits(chunk_lo) / pow10_64[8 - f_len];
+            } else {
+                f_val = parse_8_digits(chunk_lo) * pow10_64[f_len - 8] + (parse_8_digits(chunk_hi) / pow10_64[16 - f_len]);
             }
-            p++;
         }
+
+        // Combine
+        static const double powers[] = {1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18};
+        if (f_len < 19) out = (double)i_val + ((double)f_val / powers[f_len]);
+        else out = (double)i_val; // Ignore fraction if too long
+
+        p += f_len;
+        while ((unsigned char)(*p - '0') <= 9) p++; // Skip remainder
+    } else {
+        out = (double)i_val;
     }
 
-    if (*p == 'e' || *p == 'E') {
+    // 3. EXPONENT
+    if ((*p | 0x20) == 'e') {
         ++p;
         bool eneg = (*p == '-');
         if (eneg || *p == '+') ++p;
-        int exp_part = 0;
+        int exp = 0;
         while ((unsigned char)(*p - '0') <= 9) {
-            exp_part = exp_part * 10 + (*p - '0');
+            exp = exp * 10 + (*p - '0');
             ++p;
         }
-        if (eneg) exponent -= exp_part;
-        else exponent += exp_part;
+        if (eneg) exp = -exp;
+        out *= std::pow(10.0, exp);
     }
 
-    double result = (double)mantissa;
     if (exponent != 0) {
         if (exponent > 0 && exponent <= 22) {
             static const double powers_pos[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
-            result *= powers_pos[exponent];
-        } else if (exponent < 0 && exponent >= -22) {
-             static const double powers_neg[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
-             result /= powers_neg[-exponent];
+            out *= powers_pos[exponent];
         } else {
-            result *= std::pow(10.0, exponent);
+            out *= std::pow(10.0, exponent);
         }
     }
 
-    if (neg) result = -result;
-    out = result;
+    if (neg) out = -out;
     return p;
 }
 
@@ -246,20 +248,49 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
 
     while (true) {
         const char* next_pos = c_ptr;
+        // 512-byte loop unrolling (16 vectors)
         __asm__ volatile (
             "   mov $0x20, %%eax            \n"
             "   vmovd %%eax, %%xmm1         \n"
             "   vpbroadcastb %%xmm1, %%ymm1 \n"
             "1:                             \n"
+            // Block 0-15 (16x32 = 512 bytes)
             "   vmovdqu (%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 2f \n"
             "   vmovdqu 32(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 3f \n"
             "   vmovdqu 64(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 4f \n"
             "   vmovdqu 96(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 5f \n"
-            "   add $128, %[src]             \n"
+            "   vmovdqu 128(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 6f \n"
+            "   vmovdqu 160(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 7f \n"
+            "   vmovdqu 192(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 8f \n"
+            "   vmovdqu 224(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 9f \n"
+            "   vmovdqu 256(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 10f \n"
+            "   vmovdqu 288(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 11f \n"
+            "   vmovdqu 320(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 12f \n"
+            "   vmovdqu 352(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 13f \n"
+            "   vmovdqu 384(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 14f \n"
+            "   vmovdqu 416(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 15f \n"
+            "   vmovdqu 448(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 16f \n"
+            "   vmovdqu 480(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 17f \n"
+
+            "   add $512, %[src]             \n"
             "   jmp 1b                      \n"
+
             "3: add $32, %[src]; jmp 2f     \n"
             "4: add $64, %[src]; jmp 2f     \n"
             "5: add $96, %[src]; jmp 2f     \n"
+            "6: add $128, %[src]; jmp 2f    \n"
+            "7: add $160, %[src]; jmp 2f    \n"
+            "8: add $192, %[src]; jmp 2f    \n"
+            "9: add $224, %[src]; jmp 2f    \n"
+            "10: add $256, %[src]; jmp 2f   \n"
+            "11: add $288, %[src]; jmp 2f   \n"
+            "12: add $320, %[src]; jmp 2f   \n"
+            "13: add $352, %[src]; jmp 2f   \n"
+            "14: add $384, %[src]; jmp 2f   \n"
+            "15: add $416, %[src]; jmp 2f   \n"
+            "16: add $448, %[src]; jmp 2f   \n"
+            "17: add $480, %[src]; jmp 2f   \n"
+
             "2:                             \n"
             : [src] "+r" (next_pos) : : "rax", "ymm0", "ymm1", "ymm2", "memory"
         );
