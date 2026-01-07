@@ -44,8 +44,6 @@
 
 namespace Tachyon {
     class json;
-    template<typename T> void to_json(json& j, const T& t);
-    template<typename T> void from_json(const json& j, T& t);
 }
 
 // -----------------------------------------------------------------------------
@@ -215,6 +213,7 @@ namespace Tachyon {
         const char* base;
         const char* end_ptr;
 
+        Cursor() = default; // Added default ctor
         Cursor(const Document* d, uint32_t offset, const char* b_ptr) : base(b_ptr) {
             end_ptr = b_ptr + d->len;
             bitmask_ptr = d->bitmask.get();
@@ -269,6 +268,130 @@ namespace Tachyon {
 
     class json {
         std::variant<std::monostate, bool, int64_t, uint64_t, double, std::string, ObjectType, ArrayType, LazyNode> value;
+
+    public:
+        // Iterator wrapper to handle both Map and Vector iterators
+        class iterator {
+            using MapIter = ObjectType::iterator;
+            using VecIter = ArrayType::iterator;
+            std::variant<std::monostate, MapIter, VecIter> current;
+
+        public:
+            using iterator_category = std::forward_iterator_tag;
+            using value_type = json;
+            using difference_type = std::ptrdiff_t;
+            using pointer = json*;
+            using reference = json&;
+
+            iterator() = default;
+            iterator(MapIter it) : current(it) {}
+            iterator(VecIter it) : current(it) {}
+
+            json& operator*() {
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current)->second;
+                if (std::holds_alternative<VecIter>(current)) return *std::get<VecIter>(current);
+                throw std::runtime_error("Invalid iterator access");
+            }
+
+            json* operator->() {
+                return &operator*();
+            }
+
+            iterator& operator++() {
+                if (std::holds_alternative<MapIter>(current)) ++std::get<MapIter>(current);
+                else if (std::holds_alternative<VecIter>(current)) ++std::get<VecIter>(current);
+                return *this;
+            }
+
+            iterator operator++(int) {
+                iterator temp = *this;
+                ++(*this);
+                return temp;
+            }
+
+            bool operator!=(const iterator& other) const {
+                if (current.index() != other.current.index()) return true;
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current) != std::get<MapIter>(other.current);
+                if (std::holds_alternative<VecIter>(current)) return std::get<VecIter>(current) != std::get<VecIter>(other.current);
+                return false; // Both monostate
+            }
+
+            bool operator==(const iterator& other) const {
+                return !(*this != other);
+            }
+
+            std::string key() const {
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current)->first;
+                return "";
+            }
+
+            json& value() const {
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current)->second;
+                if (std::holds_alternative<VecIter>(current)) return *std::get<VecIter>(current);
+                 throw std::runtime_error("Invalid iterator access");
+            }
+        };
+
+        class const_iterator {
+            using MapIter = ObjectType::const_iterator;
+            using VecIter = ArrayType::const_iterator;
+            std::variant<std::monostate, MapIter, VecIter> current;
+
+        public:
+            using iterator_category = std::forward_iterator_tag;
+            using value_type = const json;
+            using difference_type = std::ptrdiff_t;
+            using pointer = const json*;
+            using reference = const json&;
+
+            const_iterator() = default;
+            const_iterator(MapIter it) : current(it) {}
+            const_iterator(VecIter it) : current(it) {}
+
+            const json& operator*() const {
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current)->second;
+                if (std::holds_alternative<VecIter>(current)) return *std::get<VecIter>(current);
+                throw std::runtime_error("Invalid iterator access");
+            }
+
+            const json* operator->() const {
+                return &operator*();
+            }
+
+            const_iterator& operator++() {
+                if (std::holds_alternative<MapIter>(current)) ++std::get<MapIter>(current);
+                else if (std::holds_alternative<VecIter>(current)) ++std::get<VecIter>(current);
+                return *this;
+            }
+
+            const_iterator operator++(int) {
+                const_iterator temp = *this;
+                ++(*this);
+                return temp;
+            }
+
+            bool operator!=(const const_iterator& other) const {
+                if (current.index() != other.current.index()) return true;
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current) != std::get<MapIter>(other.current);
+                if (std::holds_alternative<VecIter>(current)) return std::get<VecIter>(current) != std::get<VecIter>(other.current);
+                return false;
+            }
+
+            bool operator==(const const_iterator& other) const {
+                return !(*this != other);
+            }
+
+            std::string key() const {
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current)->first;
+                return "";
+            }
+
+            const json& value() const {
+                if (std::holds_alternative<MapIter>(current)) return std::get<MapIter>(current)->second;
+                if (std::holds_alternative<VecIter>(current)) return *std::get<VecIter>(current);
+                 throw std::runtime_error("Invalid iterator access");
+            }
+        };
 
         static void encode_utf8(std::string& res, uint32_t cp) {
             if (cp <= 0x7F) res += (char)cp;
@@ -379,7 +502,7 @@ namespace Tachyon {
             bool is_obj = std::all_of(init.begin(), init.end(), [](const json& j){
                 return j.is_array() && j.size() == 2 && j[0].is_string();
             });
-            if (is_obj) {
+            if (is_obj && init.size() > 0) {
                 ObjectType obj;
                 for (const auto& el : init) obj[el[0].get<std::string>()] = el[1];
                 value = obj;
@@ -438,6 +561,51 @@ namespace Tachyon {
             else if constexpr (std::is_same_v<T, std::string>) t = as_string();
             else from_json(*this, t);
         }
+
+        // Implicit conversions
+        operator std::string() const { return as_string(); }
+        operator int() const { return (int)as_int64(); }
+        operator int64_t() const { return as_int64(); }
+        operator double() const { return as_double(); }
+        operator bool() const { return as_bool(); }
+
+        // Stream operator
+        friend std::ostream& operator<<(std::ostream& os, const json& j) {
+            os << j.dump();
+            return os;
+        }
+
+        // Iterators
+        iterator begin() {
+            materialize();
+            if (std::holds_alternative<ObjectType>(value)) return iterator(std::get<ObjectType>(value).begin());
+            if (std::holds_alternative<ArrayType>(value)) return iterator(std::get<ArrayType>(value).begin());
+            return iterator();
+        }
+
+        iterator end() {
+             materialize();
+             if (std::holds_alternative<ObjectType>(value)) return iterator(std::get<ObjectType>(value).end());
+             if (std::holds_alternative<ArrayType>(value)) return iterator(std::get<ArrayType>(value).end());
+             return iterator();
+        }
+
+        const_iterator begin() const {
+            const_cast<json*>(this)->materialize();
+            if (std::holds_alternative<ObjectType>(value)) return const_iterator(std::get<ObjectType>(value).begin());
+            if (std::holds_alternative<ArrayType>(value)) return const_iterator(std::get<ArrayType>(value).begin());
+            return const_iterator();
+        }
+
+        const_iterator end() const {
+             const_cast<json*>(this)->materialize();
+             if (std::holds_alternative<ObjectType>(value)) return const_iterator(std::get<ObjectType>(value).end());
+             if (std::holds_alternative<ArrayType>(value)) return const_iterator(std::get<ArrayType>(value).end());
+             return const_iterator();
+        }
+
+        const_iterator cbegin() const { return begin(); }
+        const_iterator cend() const { return end(); }
         template<typename T> T get() const { T t; get_to(t); return t; }
 
         json& operator[](const std::string& key) {
@@ -447,6 +615,14 @@ namespace Tachyon {
                  else throw std::runtime_error("Tachyon: Type mismatch");
              }
              return std::get<ObjectType>(value)[key];
+        }
+
+        json& operator[](const char* key) {
+            return (*this)[std::string(key)];
+        }
+
+        json& operator[](int idx) {
+            return (*this)[static_cast<size_t>(idx)];
         }
 
         json& operator[](size_t idx) {
@@ -483,6 +659,14 @@ namespace Tachyon {
             return json();
         }
 
+        const json operator[](const char* key) const {
+            return (*this)[std::string(key)];
+        }
+
+        const json operator[](int idx) const {
+            return (*this)[static_cast<size_t>(idx)];
+        }
+
         const json operator[](size_t idx) const {
             if (is_lazy()) return lazy_index(idx);
             if (std::holds_alternative<ArrayType>(value)) {
@@ -507,11 +691,59 @@ namespace Tachyon {
             return "";
         }
 
+        static int64_t parse_int_swar(const char* p) {
+            uint64_t val = 0;
+            int sign = 1;
+            if (*p == '-') { sign = -1; p++; }
+
+            // Very simple byte-by-byte for now to ensure correctness first, then optimize
+            // SWAR usually requires 8 bytes padding which we can't guarantee on the edge of the buffer easily without copy
+            // For now, let's use a fast scalar loop which is often faster than from_chars
+            while (*p >= '0' && *p <= '9') {
+                val = val * 10 + (*p - '0');
+                p++;
+            }
+            return (int64_t)val * sign;
+        }
+
+        static double parse_double_swar(const char* p) {
+            // Simplified fast double parser
+            double res = 0.0;
+            int sign = 1;
+            if (*p == '-') { sign = -1; p++; }
+            while (*p >= '0' && *p <= '9') {
+                res = res * 10.0 + (*p - '0');
+                p++;
+            }
+            if (*p == '.') {
+                p++;
+                double frac = 0.1;
+                while (*p >= '0' && *p <= '9') {
+                    res += (*p - '0') * frac;
+                    frac *= 0.1;
+                    p++;
+                }
+            }
+            if (*p == 'e' || *p == 'E') {
+                p++;
+                int exp_sign = 1;
+                if (*p == '-') { exp_sign = -1; p++; }
+                else if (*p == '+') p++;
+                int exp = 0;
+                while (*p >= '0' && *p <= '9') {
+                    exp = exp * 10 + (*p - '0');
+                    p++;
+                }
+                res *= std::pow(10.0, exp * exp_sign);
+            }
+            return res * sign;
+        }
+
         int64_t as_int64() const {
              if (is_lazy()) {
                 const auto& l = std::get<LazyNode>(value);
                 const char* s = ASM::skip_whitespace(l.base_ptr + l.offset, l.base_ptr + l.doc->len);
-                int64_t i = 0; std::from_chars(s, l.base_ptr + l.doc->len, i); return i;
+                return parse_int_swar(s);
              }
              if (std::holds_alternative<int64_t>(value)) return std::get<int64_t>(value);
              if (std::holds_alternative<double>(value)) return (int64_t)std::get<double>(value);
@@ -522,7 +754,7 @@ namespace Tachyon {
              if (is_lazy()) {
                 const auto& l = std::get<LazyNode>(value);
                 const char* s = ASM::skip_whitespace(l.base_ptr + l.offset, l.base_ptr + l.doc->len);
-                double d = 0.0; std::from_chars(s, l.base_ptr + l.doc->len, d, std::chars_format::general); return d;
+                return parse_double_swar(s);
              }
              if (std::holds_alternative<double>(value)) return std::get<double>(value);
              if (std::holds_alternative<int64_t>(value)) return (double)std::get<int64_t>(value);
@@ -595,7 +827,7 @@ namespace Tachyon {
                         if (vc == '{') skip_container(cur, base, '{', '}');
                         else if (vc == '[') skip_container(cur, base, '[', ']');
                         else if (vc == '"') { cur.next(); cur.next(); }
-                        obj[std::move(k)] = std::move(child);
+                        obj[std::move(k)] = child;
                     }
                 }
                 value = std::move(obj);
