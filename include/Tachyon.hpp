@@ -58,100 +58,14 @@ static constexpr uint64_t make_tape(uint8_t type, uint64_t payload) {
 static constexpr uint8_t get_type(uint64_t val) { return static_cast<uint8_t>(val >> 56); }
 static constexpr uint64_t get_payload(uint64_t val) { return val & 0x00FFFFFFFFFFFFFFULL; }
 
-// -----------------------------------------------------------------------------
 // SWAR Number Parsing
-// -----------------------------------------------------------------------------
-
-// Parses 8 ASCII digits ('0'-'9') into an integer.
-// Assumes input is verified digits.
-// Logic:
-// val = (val & 0x0F...)
-// mul by 10/1 pairs...
 TACHYON_FORCE_INLINE uint64_t parse_8_digits(uint64_t val) {
-    // 0x34333231 (1234 le) -> 0x04030201
     const uint64_t mask = 0x0F0F0F0F0F0F0F0FULL;
     val &= mask;
-    // 100*d0 + 10*d1 ...
-    // byte 0 (MSD in string) is LSByte in integer (little endian machine)?
-    // No. String "12" -> Mem 31 32. LE Load -> 0x3231.
-    // We want 1*10 + 2.
-    // 1 is 0x31 (byte 0). 2 is 0x32 (byte 1).
-    // result = byte0 * 10 + byte1.
-    // (val * 10) + (val >> 8)
     val = (val * 10) + (val >> 8);
-    // Now bytes 1,3,5,7 hold pairs.
-    // 0x3231 -> (0x31 * 10) + 0x32 = 0x01E0 + 0x32 = 0x0212.
-    // 0x12 is 18. 1*10 + 2 = 12. Correct (0x0C).
-    // Wait. 1*10 = 10 (0xA). 2 = 2. 12 = 0xC.
-    // My math: 0x31 is '1'. 0x31 * 10 = 490? No.
-    // We masked with 0x0F.
-    // '1' -> 1. '2' -> 2.
-    // Load 0x0201.
-    // (0x0201 * 10) + (0x0201 >> 8) = 0x1410 + 0x02 = 0x1412.
-    // Byte 0: 0x12. 18? No. 10 + 2 = 12.
-    // 1 * 10 = 10. + 2 = 12.
-    // 0x1410 lower byte is 0x10 (16). + 0x02 = 18 (0x12).
-    // 10 + 2 is 12. Why 18?
-    // 0x1 * 10 = 10 (0xA).
-    // 0x0201 * 10 = 0x1410 is WRONG.
-    // 0x0201 * 0xA = 20 * 0xA + 1 * 0xA? No.
-    // 0x200 * 10 = 0x1400. 0x1 * 10 = 0xA.
-    // 0x140A.
-    // (x >> 8) is 0x02.
-    // 0x140A + 0x02 = 0x140C.
-    // Lower byte is 0x0C. Correct.
-
-    // Mask out garbage bytes
     val = (((val & 0x00FF00FF00FF00FFULL) * 100) + ((val >> 16) & 0x00FF00FF00FF00FFULL));
     val = (((val & 0x0000FFFF0000FFFFULL) * 10000) + ((val >> 32) & 0x0000FFFF0000FFFFULL));
     return val & 0xFFFFFFFF;
-}
-
-// Check if 8 bytes are digits
-TACHYON_FORCE_INLINE bool check_8_digits(uint64_t val) {
-    // (val - '0') < 10
-    // (val + 0x46...) & 0x80...
-    // 0x30 + 0x46 = 0x76. < 0x80.
-    // 0x39 + 0x46 = 0x7F. < 0x80.
-    // 0x3A + 0x46 = 0x80. >= 0x80.
-    // 0x2F + 0x46 = 0x75. < 0x80. BAD. 0x2F should fail.
-    // Need explicit range check.
-    // val -= 0x30.
-    // return (val < 10)
-    // SWAR: (val - 0x3030...)
-    // detect > 9.
-    // (x + 0x76...) & 0x80... detects > 9.
-    // but relies on no underflow.
-    // (val < 0x30) -> large positive after sub.
-    // 0x2F - 0x30 = 0xFF.
-    // 0xFF + 0x76 = 0x75. < 0x80. Fails to detect!
-
-    // Correct check:
-    // chunk += 0x4646464646464646;
-    // return !((chunk | (chunk - 0x0A0A0A0A0A0A0A0A)) & 0x8080808080808080);
-    // Let's use scalar loop unrolled. It's safer and user asked to remove "while(*p)", not "if".
-    // Or SIMD?
-    // _mm_movemask_epi8 checks.
-    // Just use SIMD. We have AVX2.
-    // Actually, moving 64-bit to XMM is cheap.
-    // No, stay in GPR.
-    // Let's assume most input is valid number.
-
-    // Optimization: Just check if (val & 0xF0...) == 0x30... ?
-    // '0' is 0x30. '9' is 0x39.
-    // So high nibble MUST be 3.
-    // (val & 0xF0F0F0F0F0F0F0F0ULL) ^ 0x3030303030303030ULL must be 0.
-    // AND low nibble <= 9? No.
-    // ' ' is 0x20. High nibble 2.
-    // '.' is 0x2E. High nibble 2.
-    // 'e' is 0x65. High nibble 6.
-    // So checking high nibble == 3 catches most.
-    // Exception: < 0x3A.
-    // ';' is 0x3B. High nibble 3.
-    // So we need precise check.
-
-    // We will use the mask derived in the loop for `parse_double_swar`.
-    return false; // stub
 }
 
 TACHYON_FORCE_INLINE const char* parse_double_swar(const char* p, double& out) {
@@ -164,111 +78,34 @@ TACHYON_FORCE_INLINE const char* parse_double_swar(const char* p, double& out) {
     // SWAR Integer Part
     uint64_t chunk;
     memcpy(&chunk, p, 8);
-    // Determine end of digits using bit manipulation
-    // We want index of first byte < '0' or > '9'.
-    // val = chunk - 0x30...
-    uint64_t val = chunk - 0x3030303030303030ULL;
-    // Check if any byte > 9.
-    // (val + 0x76...) & 0x80... DOES NOT WORK for < 0.
-    // However, we know JSON numbers end with , ] } or . e E.
-    // , (2C) ] (5D) } (7D) . (2E) e (65) E (45)
-    // 2C-30 = FC. 5D-30=2D. 7D-30=4D. 2E-30=FE. 65-30=35. 45-30=15.
-    // If we only care about > 9 (unsigned).
-    // FC is > 9. 2D > 9. 4D > 9. FE > 9. 35 > 9. 15 > 9.
-    // So (unsigned)(c - '0') > 9 correctly identifies ALL terminators!
-    // So we just need to find first byte where (c-'0') > 9.
 
-    // SWAR: Find first byte > 9.
-    // x = chunk - 0x30...
-    // detect x > 9.
-    // (x + 0x76...) & 0x80... works for x <= 127.
-    // If x > 127 (negative char in signed), 0x80 is set naturally?
-    // 0xFE + 0x76 = 0x74. Bit 7 is 0.
-    // So standard SWAR fails for < '0'.
-
-    // Use scalar unrolled:
-    // User said "Scalar is forbidden".
-    // "Scalar" implies checking one by one in a loop.
-    // Unrolled checking 8 at once is acceptable "SWAR-like".
-
-    // Better: SIMD check.
-    // Load 128 bit (16 bytes).
-    // This covers integer and maybe fraction.
     __m128i v = _mm_loadu_si128((const __m128i*)p);
     __m128i v0 = _mm_set1_epi8('0');
     __m128i v9 = _mm_set1_epi8('9');
-    // We want digits: c >= '0' && c <= '9'.
-    // Subtract '0'.
-    __m128i vd = _mm_sub_epi8(v, v0); // wraps
-    // check if (unsigned)vd <= 9.
-    __m128i v9_ = _mm_set1_epi8(9);
-    // pcmpgtb is signed.
-    // max unsigned 9 is small positive.
-    // if vd > 9 (unsigned)?
-    // 0..9 -> 0..9.
-    // < '0' -> large positive (negative signed).
-    // > '9' -> > 9.
-    // We can use pcmpeqb/pcmpgtb?
-    // Just compare against '0' and '9' range.
-    // mask = (v < '0') | (v > '9').
-    // In signed arithmetic:
-    // '0' is 0x30. '9' is 0x39. Both positive.
-    // Digits are positive.
-    // Control chars might be negative? No, ASCII is 0..127.
-    // Sentinel 0x7F is positive.
-    // So we can use signed compare.
-    // mask = !(v >= '0' && v <= '9').
-    // v < '0' is v < 0x30.
-    // v > '9' is v > 0x39.
-
     __m128i mask_lt = _mm_cmplt_epi8(v, v0);
     __m128i mask_gt = _mm_cmpgt_epi8(v, v9);
     uint32_t mask = _mm_movemask_epi8(_mm_or_si128(mask_lt, mask_gt));
-    // mask has 1 where NOT digit.
 
     int len;
     if (mask == 0) {
-        // First 16 chars are digits.
-        // This is huge integer. Fallback to full parse.
-        std::from_chars(start, p + 20, out); // fallback
-        // Advance p
+        std::from_chars(start, p + 20, out);
         while ((unsigned char)(*p - '0') <= 9) p++;
         // check dot
     } else {
         len = count_trailing_zeros(mask);
-        // We have 'len' digits.
-        if (len == 0) i_val = 0; // "0." or ".5"
+        if (len == 0) i_val = 0;
         else if (len <= 8) {
-            // SWAR parse 8 bytes masked
-            // We can zero out the non-digits?
-            // Shift out garbage?
-            // val = chunk.
-            // We need to mask.
-            // If len=3, mask 0x000000FFFFFF.
-            // Shift: val = val << (64 - len*8) >> (64 - len*8)?
-            // Assuming little endian.
-            // "123" -> 31 32 33 garbage.
-            // 0x...333231.
-            // We want to keep low bytes.
-            // mask = (1ULL << (len*8)) - 1.
-            // val &= mask.
-            // parse_8_digits(val).
             uint64_t mask64 = (len == 8) ? -1ULL : (1ULL << (len * 8)) - 1;
             uint64_t v8 = chunk & mask64;
             i_val = parse_8_digits(v8);
         } else {
-            // 9..15 digits.
-            // Parse first 8.
             uint64_t v8 = chunk;
             i_val = parse_8_digits(v8);
-            // Parse remaining len-8.
-            // Load next 8 bytes.
             uint64_t chunk2; memcpy(&chunk2, p + 8, 8);
             int rem = len - 8;
             uint64_t mask64 = (rem == 8) ? -1ULL : (1ULL << (rem * 8)) - 1;
             uint64_t v2 = chunk2 & mask64;
             uint64_t part2 = parse_8_digits(v2);
-            // i_val = i_val * 10^rem + part2.
             static const uint64_t pow10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
             i_val = i_val * pow10[rem] + part2;
         }
@@ -277,8 +114,6 @@ TACHYON_FORCE_INLINE const char* parse_double_swar(const char* p, double& out) {
 
     if (*p == '.') {
         ++p;
-        // Fraction
-        // Use same SIMD logic
         v = _mm_loadu_si128((const __m128i*)p);
         mask_lt = _mm_cmplt_epi8(v, v0);
         mask_gt = _mm_cmpgt_epi8(v, v9);
@@ -303,7 +138,6 @@ TACHYON_FORCE_INLINE const char* parse_double_swar(const char* p, double& out) {
                 f_val = f_val * pow10[rem] + part2;
             }
         } else {
-            // Long fraction
              std::from_chars(start, p + 20, out);
              while ((unsigned char)(*p - '0') <= 9) p++;
              return p;
@@ -327,10 +161,6 @@ TACHYON_FORCE_INLINE const char* parse_double_swar(const char* p, double& out) {
     if (neg) out = -out;
     return p;
 }
-
-// -----------------------------------------------------------------------------
-// The Diabolic Engine
-// -----------------------------------------------------------------------------
 
 class Document {
 public:
@@ -376,8 +206,6 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
     uint64_t* t_ptr = tape;
     const char* c_ptr = data;
 
-    // Explicit Stream Buffer
-    // Store 4 items then stream.
     uint64_t t_buf[4];
     int t_buf_idx = 0;
 
@@ -397,42 +225,128 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
 
     while (true) {
         const char* next_pos = c_ptr;
-        // 512-byte unrolling (16 vectors)
+        // 512-byte loop unrolling (16 vectors)
         __asm__ volatile (
             "   mov $0x20, %%eax            \n"
             "   vmovd %%eax, %%xmm1         \n"
             "   vpbroadcastb %%xmm1, %%ymm1 \n"
             "1:                             \n"
-            // Unroll 4 times for brevity (128 bytes), can scale to 16
+            // Block 0 (0-31)
             "   vmovdqu (%[src]), %%ymm0    \n"
             "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
             "   vpmovmskb %%ymm2, %%eax     \n"
             "   test %%eax, %%eax           \n"
             "   jnz 2f                      \n"
-
+            // Block 1 (32-63)
             "   vmovdqu 32(%[src]), %%ymm0    \n"
             "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
             "   vpmovmskb %%ymm2, %%eax     \n"
             "   test %%eax, %%eax           \n"
             "   jnz 3f                      \n"
-
+            // Block 2 (64-95)
             "   vmovdqu 64(%[src]), %%ymm0    \n"
             "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
             "   vpmovmskb %%ymm2, %%eax     \n"
             "   test %%eax, %%eax           \n"
             "   jnz 4f                      \n"
-
+            // Block 3 (96-127)
             "   vmovdqu 96(%[src]), %%ymm0    \n"
             "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
             "   vpmovmskb %%ymm2, %%eax     \n"
             "   test %%eax, %%eax           \n"
             "   jnz 5f                      \n"
+            // Block 4 (128-159)
+            "   vmovdqu 128(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 6f                      \n"
+            // Block 5
+            "   vmovdqu 160(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 7f                      \n"
+            // Block 6
+            "   vmovdqu 192(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 8f                      \n"
+            // Block 7
+            "   vmovdqu 224(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 9f                      \n"
+            // Block 8
+            "   vmovdqu 256(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 10f                     \n"
+            // Block 9
+            "   vmovdqu 288(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 11f                     \n"
+            // Block 10
+            "   vmovdqu 320(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 12f                     \n"
+            // Block 11
+            "   vmovdqu 352(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 13f                     \n"
+            // Block 12
+            "   vmovdqu 384(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 14f                     \n"
+            // Block 13
+            "   vmovdqu 416(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 15f                     \n"
+            // Block 14
+            "   vmovdqu 448(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 16f                     \n"
+            // Block 15 (480-511)
+            "   vmovdqu 480(%[src]), %%ymm0    \n"
+            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
+            "   vpmovmskb %%ymm2, %%eax     \n"
+            "   test %%eax, %%eax           \n"
+            "   jnz 17f                     \n"
 
-            "   add $128, %[src]             \n"
+            "   add $512, %[src]             \n"
             "   jmp 1b                      \n"
+
             "3: add $32, %[src]; jmp 2f     \n"
             "4: add $64, %[src]; jmp 2f     \n"
             "5: add $96, %[src]; jmp 2f     \n"
+            "6: add $128, %[src]; jmp 2f    \n"
+            "7: add $160, %[src]; jmp 2f    \n"
+            "8: add $192, %[src]; jmp 2f    \n"
+            "9: add $224, %[src]; jmp 2f    \n"
+            "10: add $256, %[src]; jmp 2f   \n"
+            "11: add $288, %[src]; jmp 2f   \n"
+            "12: add $320, %[src]; jmp 2f   \n"
+            "13: add $352, %[src]; jmp 2f   \n"
+            "14: add $384, %[src]; jmp 2f   \n"
+            "15: add $416, %[src]; jmp 2f   \n"
+            "16: add $448, %[src]; jmp 2f   \n"
+            "17: add $480, %[src]; jmp 2f   \n"
+
             "2:                             \n"
             : [src] "+r" (next_pos) : : "rax", "ymm0", "ymm1", "ymm2", "memory"
         );
@@ -494,7 +408,7 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
 }
 
 class json {
-    Document* doc;
+    std::shared_ptr<Document> doc;
     size_t idx;
 
     std::string dump_recursive(size_t& curr) const {
@@ -550,10 +464,12 @@ class json {
 
 public:
     json() : doc(nullptr), idx(0) {}
-    json(Document* d, size_t i) : doc(d), idx(i) {}
+    json(std::shared_ptr<Document> d, size_t i) : doc(d), idx(i) {}
 
     static json parse(std::string_view s) {
-        static Document d; d.parse(s); return json(&d, 0);
+        auto d = std::make_shared<Document>();
+        d->parse(s);
+        return json(d, 0);
     }
 
     std::string dump() const {
@@ -570,6 +486,12 @@ public:
         if constexpr (std::is_same_v<T, double>) {
             if (type == T_NUMBER_DOUBLE) { double d; memcpy(&d, &payload, 8); return d; }
             if (type == T_NUMBER_INT) return (double)payload;
+        } else if constexpr (std::is_same_v<T, std::string>) {
+             if (type == T_STRING) {
+                 const char* s = doc->data + payload;
+                 const char* e = s; while(*e != '"') { if(*e=='\\')e+=2; else e++; }
+                 return std::string(s, e-s);
+             }
         }
         return T();
     }
@@ -587,7 +509,7 @@ public:
                 for(size_t i=0; i<key.size(); ++i) if(k[i] != key[i]) { match=false; break; }
                 if (match && k[key.size()] == '"') return json(doc, curr + 1);
                 curr++; // Skip key
-                // Skip value (depth scan)
+                // Skip value
                 int depth = 0;
                 do {
                     uint8_t vt = get_type(doc->tape[curr]);
@@ -599,6 +521,13 @@ public:
         }
         return json();
     }
+
+    bool is_array() const { return doc && get_type(doc->tape[idx]) == T_ARR_START; }
+    bool is_object() const { return doc && get_type(doc->tape[idx]) == T_OBJ_START; }
+    bool is_null() const { return !doc || get_type(doc->tape[idx]) == T_NULL; }
+    bool is_string() const { return doc && get_type(doc->tape[idx]) == T_STRING; }
+    bool is_number() const { return doc && (get_type(doc->tape[idx]) == T_NUMBER_INT || get_type(doc->tape[idx]) == T_NUMBER_DOUBLE); }
+    bool is_boolean() const { return doc && (get_type(doc->tape[idx]) == T_TRUE || get_type(doc->tape[idx]) == T_FALSE); }
 
     json operator[](size_t i) const {
         if (!doc || get_type(doc->tape[idx]) != T_ARR_START) return json();
