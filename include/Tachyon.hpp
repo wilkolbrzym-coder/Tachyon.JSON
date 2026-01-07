@@ -1,8 +1,8 @@
 #ifndef TACHYON_HPP
 #define TACHYON_HPP
 
-// Tachyon v7.0 FINAL - The Diabolic Engine
-// Architecture: Tape-based, Raw Inline ASM Kernel, AVX2, SWAR Number Parsing
+// Tachyon v7.2 - Saturating SWAR & Diagnostic Suite
+// Architecture: Tape-based, Raw Inline ASM Kernel, AVX2, Saturating SWAR Number Parsing
 // Copyright (c) 2024 Tachyon Authors. All Rights Reserved.
 
 #include <cstdint>
@@ -18,7 +18,6 @@
 #include <cmath>
 #include <bit>
 #include <stdexcept>
-#include <charconv>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -68,97 +67,99 @@ TACHYON_FORCE_INLINE uint64_t parse_8_digits(uint64_t val) {
     return val & 0xFFFFFFFF;
 }
 
-TACHYON_FORCE_INLINE const char* parse_double_swar(const char* p, double& out) {
+TACHYON_FORCE_INLINE const char* parse_double_saturated(const char* p, double& out) {
     bool neg = false;
     if (*p == '-') { neg = true; ++p; }
 
-    uint64_t i_val = 0;
-    const char* start = p;
+    uint64_t mantissa = 0;
+    int exponent = 0;
+    int digits_processed = 0;
 
-    // SWAR Integer Part
-    uint64_t chunk;
-    memcpy(&chunk, p, 8);
+    {
+        uint64_t chunk; memcpy(&chunk, p, 8);
+        uint64_t val = chunk - 0x3030303030303030ULL;
+        uint64_t has_non_digit = (val + 0x7676767676767676ULL) | val;
+        has_non_digit &= 0x8080808080808080ULL;
 
-    __m128i v = _mm_loadu_si128((const __m128i*)p);
-    __m128i v0 = _mm_set1_epi8('0');
-    __m128i v9 = _mm_set1_epi8('9');
-    __m128i mask_lt = _mm_cmplt_epi8(v, v0);
-    __m128i mask_gt = _mm_cmpgt_epi8(v, v9);
-    uint32_t mask = _mm_movemask_epi8(_mm_or_si128(mask_lt, mask_gt));
+        if (has_non_digit == 0) {
+            mantissa = parse_8_digits(chunk);
+            p += 8;
+            digits_processed += 8;
 
-    int len;
-    if (mask == 0) {
-        std::from_chars(start, p + 20, out);
-        while ((unsigned char)(*p - '0') <= 9) p++;
-        // check dot
-    } else {
-        len = count_trailing_zeros(mask);
-        if (len == 0) i_val = 0;
-        else if (len <= 8) {
-            uint64_t mask64 = (len == 8) ? -1ULL : (1ULL << (len * 8)) - 1;
-            uint64_t v8 = chunk & mask64;
-            i_val = parse_8_digits(v8);
+            memcpy(&chunk, p, 8);
+            val = chunk - 0x3030303030303030ULL;
+            has_non_digit = (val + 0x7676767676767676ULL) | val;
+            has_non_digit &= 0x8080808080808080ULL;
+
+            if (has_non_digit == 0) {
+                mantissa = mantissa * 100000000ULL + parse_8_digits(chunk);
+                p += 8;
+                digits_processed += 8;
+                while ((unsigned char)(*p - '0') <= 9) {
+                    if (digits_processed < 19) {
+                        mantissa = mantissa * 10 + (*p - '0');
+                        digits_processed++;
+                    } else {
+                        exponent++;
+                    }
+                    p++;
+                }
+            } else {
+                while ((unsigned char)(*p - '0') <= 9) {
+                    mantissa = mantissa * 10 + (*p - '0');
+                    digits_processed++;
+                    p++;
+                }
+            }
         } else {
-            uint64_t v8 = chunk;
-            i_val = parse_8_digits(v8);
-            uint64_t chunk2; memcpy(&chunk2, p + 8, 8);
-            int rem = len - 8;
-            uint64_t mask64 = (rem == 8) ? -1ULL : (1ULL << (rem * 8)) - 1;
-            uint64_t v2 = chunk2 & mask64;
-            uint64_t part2 = parse_8_digits(v2);
-            static const uint64_t pow10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
-            i_val = i_val * pow10[rem] + part2;
+            while ((unsigned char)(*p - '0') <= 9) {
+                mantissa = mantissa * 10 + (*p - '0');
+                digits_processed++;
+                p++;
+            }
         }
-        p += len;
     }
 
     if (*p == '.') {
         ++p;
-        v = _mm_loadu_si128((const __m128i*)p);
-        mask_lt = _mm_cmplt_epi8(v, v0);
-        mask_gt = _mm_cmpgt_epi8(v, v9);
-        mask = _mm_movemask_epi8(_mm_or_si128(mask_lt, mask_gt));
-
-        uint64_t f_val = 0;
-        int f_len = 0;
-
-        if (mask != 0) {
-            f_len = count_trailing_zeros(mask);
-            uint64_t chunkF; memcpy(&chunkF, p, 8);
-            if (f_len <= 8) {
-                uint64_t mask64 = (f_len == 8) ? -1ULL : (1ULL << (f_len * 8)) - 1;
-                f_val = parse_8_digits(chunkF & mask64);
-            } else {
-                f_val = parse_8_digits(chunkF);
-                uint64_t chunk2; memcpy(&chunk2, p + 8, 8);
-                int rem = f_len - 8;
-                uint64_t mask64 = (rem == 8) ? -1ULL : (1ULL << (rem * 8)) - 1;
-                uint64_t part2 = parse_8_digits(chunk2 & mask64);
-                static const uint64_t pow10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
-                f_val = f_val * pow10[rem] + part2;
+        while ((unsigned char)(*p - '0') <= 9) {
+            if (digits_processed < 19) {
+                mantissa = mantissa * 10 + (*p - '0');
+                digits_processed++;
+                exponent--;
             }
-        } else {
-             std::from_chars(start, p + 20, out);
-             while ((unsigned char)(*p - '0') <= 9) p++;
-             return p;
+            p++;
         }
-
-        static const double powers[] = {1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18};
-        if (f_len < 19) out = (double)i_val + ((double)f_val / powers[f_len]);
-        else { std::from_chars(start, p, out); return p; }
-        p += f_len;
-    } else {
-        out = (double)i_val;
     }
 
     if (*p == 'e' || *p == 'E') {
-        ++p; bool eneg = (*p == '-'); if (eneg || *p == '+') ++p;
-        int exp = 0; while (*p >= '0' && *p <= '9') { exp = exp * 10 + (*p - '0'); ++p; }
-        if (eneg) exp = -exp;
-        out *= std::pow(10.0, exp);
+        ++p;
+        bool eneg = (*p == '-');
+        if (eneg || *p == '+') ++p;
+        int exp_part = 0;
+        while ((unsigned char)(*p - '0') <= 9) {
+            exp_part = exp_part * 10 + (*p - '0');
+            ++p;
+        }
+        if (eneg) exponent -= exp_part;
+        else exponent += exp_part;
     }
 
-    if (neg) out = -out;
+    double result = (double)mantissa;
+    if (exponent != 0) {
+        if (exponent > 0 && exponent <= 22) {
+            static const double powers_pos[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+            result *= powers_pos[exponent];
+        } else if (exponent < 0 && exponent >= -22) {
+             static const double powers_neg[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+             result /= powers_neg[-exponent];
+        } else {
+            result *= std::pow(10.0, exponent);
+        }
+    }
+
+    if (neg) result = -result;
+    out = result;
     return p;
 }
 
@@ -206,15 +207,35 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
     uint64_t* t_ptr = tape;
     const char* c_ptr = data;
 
-    uint64_t t_buf[4];
+    // Explicit Stream Buffer
+    // Store 8 items then stream. 8 to allow bursts of 2-slot tokens.
+    uint64_t t_buf[8];
     int t_buf_idx = 0;
 
     auto emit = [&](uint64_t val) {
         t_buf[t_buf_idx++] = val;
-        if (t_buf_idx == 4) {
+        if (t_buf_idx >= 4) { // Stream 4 at a time (AVX2 256-bit)
              _mm256_stream_si256((__m256i*)t_ptr, _mm256_loadu_si256((const __m256i*)t_buf));
              t_ptr += 4;
-             t_buf_idx = 0;
+             t_buf_idx -= 4;
+             if (t_buf_idx > 0) { // Shift remainder
+                 t_buf[0] = t_buf[4]; t_buf[1] = t_buf[5]; t_buf[2] = t_buf[6]; t_buf[3] = t_buf[7];
+             }
+        }
+    };
+
+    // Special emit for Double (2 slots)
+    auto emit_double = [&](double d) {
+        uint64_t bits; memcpy(&bits, &d, 8);
+        t_buf[t_buf_idx++] = make_tape(T_NUMBER_DOUBLE, 0);
+        t_buf[t_buf_idx++] = bits;
+        if (t_buf_idx >= 4) {
+             _mm256_stream_si256((__m256i*)t_ptr, _mm256_loadu_si256((const __m256i*)t_buf));
+             t_ptr += 4;
+             t_buf_idx -= 4;
+             if (t_buf_idx > 0) {
+                 for(int k=0; k<t_buf_idx; ++k) t_buf[k] = t_buf[k+4];
+             }
         }
     };
 
@@ -225,128 +246,20 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
 
     while (true) {
         const char* next_pos = c_ptr;
-        // 512-byte loop unrolling (16 vectors)
         __asm__ volatile (
             "   mov $0x20, %%eax            \n"
             "   vmovd %%eax, %%xmm1         \n"
             "   vpbroadcastb %%xmm1, %%ymm1 \n"
             "1:                             \n"
-            // Block 0 (0-31)
-            "   vmovdqu (%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 2f                      \n"
-            // Block 1 (32-63)
-            "   vmovdqu 32(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 3f                      \n"
-            // Block 2 (64-95)
-            "   vmovdqu 64(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 4f                      \n"
-            // Block 3 (96-127)
-            "   vmovdqu 96(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 5f                      \n"
-            // Block 4 (128-159)
-            "   vmovdqu 128(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 6f                      \n"
-            // Block 5
-            "   vmovdqu 160(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 7f                      \n"
-            // Block 6
-            "   vmovdqu 192(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 8f                      \n"
-            // Block 7
-            "   vmovdqu 224(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 9f                      \n"
-            // Block 8
-            "   vmovdqu 256(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 10f                     \n"
-            // Block 9
-            "   vmovdqu 288(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 11f                     \n"
-            // Block 10
-            "   vmovdqu 320(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 12f                     \n"
-            // Block 11
-            "   vmovdqu 352(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 13f                     \n"
-            // Block 12
-            "   vmovdqu 384(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 14f                     \n"
-            // Block 13
-            "   vmovdqu 416(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 15f                     \n"
-            // Block 14
-            "   vmovdqu 448(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 16f                     \n"
-            // Block 15 (480-511)
-            "   vmovdqu 480(%[src]), %%ymm0    \n"
-            "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n"
-            "   vpmovmskb %%ymm2, %%eax     \n"
-            "   test %%eax, %%eax           \n"
-            "   jnz 17f                     \n"
-
-            "   add $512, %[src]             \n"
+            "   vmovdqu (%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 2f \n"
+            "   vmovdqu 32(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 3f \n"
+            "   vmovdqu 64(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 4f \n"
+            "   vmovdqu 96(%[src]), %%ymm0    \n" "   vpcmpgtb %%ymm1, %%ymm0, %%ymm2 \n" "   vpmovmskb %%ymm2, %%eax     \n" "   test %%eax, %%eax \n" "   jnz 5f \n"
+            "   add $128, %[src]             \n"
             "   jmp 1b                      \n"
-
             "3: add $32, %[src]; jmp 2f     \n"
             "4: add $64, %[src]; jmp 2f     \n"
             "5: add $96, %[src]; jmp 2f     \n"
-            "6: add $128, %[src]; jmp 2f    \n"
-            "7: add $160, %[src]; jmp 2f    \n"
-            "8: add $192, %[src]; jmp 2f    \n"
-            "9: add $224, %[src]; jmp 2f    \n"
-            "10: add $256, %[src]; jmp 2f   \n"
-            "11: add $288, %[src]; jmp 2f   \n"
-            "12: add $320, %[src]; jmp 2f   \n"
-            "13: add $352, %[src]; jmp 2f   \n"
-            "14: add $384, %[src]; jmp 2f   \n"
-            "15: add $416, %[src]; jmp 2f   \n"
-            "16: add $448, %[src]; jmp 2f   \n"
-            "17: add $480, %[src]; jmp 2f   \n"
-
             "2:                             \n"
             : [src] "+r" (next_pos) : : "rax", "ymm0", "ymm1", "ymm2", "memory"
         );
@@ -384,9 +297,8 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
                 goto next_chunk;
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 double d;
-                c_ptr = parse_double_swar(curr, d);
-                uint64_t d_bits; memcpy(&d_bits, &d, 8);
-                emit(make_tape(T_NUMBER_DOUBLE, d_bits));
+                c_ptr = parse_double_saturated(curr, d);
+                emit_double(d); // Uses 2 slots
                 goto next_chunk;
             }
             else if (c == '{') emit(make_tape(T_OBJ_START, 0));
@@ -396,7 +308,7 @@ TACHYON_FORCE_INLINE void Document::parse(std::string_view json) {
             else if (c == 't') { emit(make_tape(T_TRUE, 0)); c_ptr = curr + 4; goto next_chunk; }
             else if (c == 'f') { emit(make_tape(T_FALSE, 0)); c_ptr = curr + 5; goto next_chunk; }
             else if (c == 'n') { emit(make_tape(T_NULL, 0)); c_ptr = curr + 4; goto next_chunk; }
-            else if ((unsigned char)c == 0x7F) { goto done; } // Sentinel
+            else if ((unsigned char)c == 0x7F) { goto done; }
             mask &= ~(1U << tz);
         }
         c_ptr += 32;
@@ -421,7 +333,10 @@ class json {
              return std::string("\"") + std::string(s, e-s) + "\"";
         }
         if (t == T_NUMBER_DOUBLE) {
-            double d; uint64_t p = get_payload(doc->tape[curr]); memcpy(&d, &p, 8);
+            double d;
+            uint64_t bits = doc->tape[curr+1]; // Next slot
+            memcpy(&d, &bits, 8);
+            curr++; // Skip extra slot
             return std::to_string(d);
         }
         if (t == T_NUMBER_INT) return std::to_string((int64_t)get_payload(doc->tape[curr]));
@@ -484,7 +399,12 @@ public:
         uint8_t type = get_type(val);
         uint64_t payload = get_payload(val);
         if constexpr (std::is_same_v<T, double>) {
-            if (type == T_NUMBER_DOUBLE) { double d; memcpy(&d, &payload, 8); return d; }
+            if (type == T_NUMBER_DOUBLE) {
+                double d;
+                uint64_t bits = doc->tape[idx+1];
+                memcpy(&d, &bits, 8);
+                return d;
+            }
             if (type == T_NUMBER_INT) return (double)payload;
         } else if constexpr (std::is_same_v<T, std::string>) {
              if (type == T_STRING) {
@@ -495,6 +415,13 @@ public:
         }
         return T();
     }
+
+    bool is_array() const { return doc && get_type(doc->tape[idx]) == T_ARR_START; }
+    bool is_object() const { return doc && get_type(doc->tape[idx]) == T_OBJ_START; }
+    bool is_null() const { return !doc || get_type(doc->tape[idx]) == T_NULL; }
+    bool is_string() const { return doc && get_type(doc->tape[idx]) == T_STRING; }
+    bool is_number() const { return doc && (get_type(doc->tape[idx]) == T_NUMBER_INT || get_type(doc->tape[idx]) == T_NUMBER_DOUBLE); }
+    bool is_boolean() const { return doc && (get_type(doc->tape[idx]) == T_TRUE || get_type(doc->tape[idx]) == T_FALSE); }
 
     json operator[](const std::string& key) const {
         if (!doc || get_type(doc->tape[idx]) != T_OBJ_START) return json();
@@ -515,19 +442,13 @@ public:
                     uint8_t vt = get_type(doc->tape[curr]);
                     if (vt == T_OBJ_START || vt == T_ARR_START) depth++;
                     else if (vt == T_OBJ_END || vt == T_ARR_END) depth--;
+                    else if (vt == T_NUMBER_DOUBLE) curr++; // Skip extra slot
                     curr++;
                 } while(depth > 0);
             } else curr++;
         }
         return json();
     }
-
-    bool is_array() const { return doc && get_type(doc->tape[idx]) == T_ARR_START; }
-    bool is_object() const { return doc && get_type(doc->tape[idx]) == T_OBJ_START; }
-    bool is_null() const { return !doc || get_type(doc->tape[idx]) == T_NULL; }
-    bool is_string() const { return doc && get_type(doc->tape[idx]) == T_STRING; }
-    bool is_number() const { return doc && (get_type(doc->tape[idx]) == T_NUMBER_INT || get_type(doc->tape[idx]) == T_NUMBER_DOUBLE); }
-    bool is_boolean() const { return doc && (get_type(doc->tape[idx]) == T_TRUE || get_type(doc->tape[idx]) == T_FALSE); }
 
     json operator[](size_t i) const {
         if (!doc || get_type(doc->tape[idx]) != T_ARR_START) return json();
@@ -541,6 +462,7 @@ public:
                 uint8_t vt = get_type(doc->tape[curr]);
                 if (vt == T_OBJ_START || vt == T_ARR_START) depth++;
                 else if (vt == T_OBJ_END || vt == T_ARR_END) depth--;
+                else if (vt == T_NUMBER_DOUBLE) curr++; // Skip extra slot
                 curr++;
             } while(depth > 0);
             count++;

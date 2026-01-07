@@ -14,24 +14,11 @@
 #define HAS_SIMDJSON 1
 #else
 #define HAS_SIMDJSON 0
+namespace simdjson { class dom { public: class parser { public: struct res { int error() { return 0; } }; res parse(const std::string&) { return {}; } }; }; }
 #endif
 #else
 #define HAS_SIMDJSON 0
-#endif
-
-// Mock Nlohmann if not present
-#ifdef __has_include
-#if __has_include("../include/nlohmann/json.hpp")
-#include "../include/nlohmann/json.hpp"
-#define HAS_NLOHMANN 1
-#elif __has_include("../nlohmann_json.hpp")
-#include "../nlohmann_json.hpp"
-#define HAS_NLOHMANN 1
-#else
-#define HAS_NLOHMANN 0
-#endif
-#else
-#define HAS_NLOHMANN 0
+namespace simdjson { class dom { public: class parser { public: struct res { int error() { return 0; } }; res parse(const std::string&) { return {}; } }; }; }
 #endif
 
 // Glaze
@@ -62,29 +49,27 @@ struct BenchResult {
     uint64_t checksum;
 };
 
-int main(int argc, char** argv) {
-    std::string filename = "canada.json";
-    if (argc > 1) filename = argv[1];
-
+void run_test(const std::string& filename) {
     std::string data = read_file(filename);
     if (data.empty()) {
         std::cerr << "[Error] Failed to load " << filename << "\n";
-        return 1;
+        return;
     }
-
-    // Create padded string for Simdjson
     std::string padded_data = data;
+#if HAS_SIMDJSON
     padded_data.resize(padded_data.size() + simdjson::SIMDJSON_PADDING);
+#else
+    padded_data.resize(padded_data.size() + 1024);
+#endif
 
-    std::cout << "==============================================================\n";
-    std::cout << " Tachyon v7.0 ULTIMATE BENCHMARK (On-Demand Mode)\n";
+    std::cout << "-----------------------------------------------------------------\n";
     std::cout << " File: " << filename << " (" << std::fixed << std::setprecision(2) << (data.size() / 1024.0 / 1024.0) << " MB)\n";
-    std::cout << "==============================================================\n\n";
+    std::cout << "-----------------------------------------------------------------\n";
 
-    int iterations = 50;
+    int iterations = 20; // 50MB file needs fewer iters to be fast
     std::vector<BenchResult> results;
 
-    // 1. Tachyon v7.0 (Tape)
+    // 1. Tachyon v7.2
     {
         // Warmup
         auto json = Tachyon::json::parse(data);
@@ -93,48 +78,44 @@ int main(int argc, char** argv) {
         uint64_t checksum = 0;
         for (int i = 0; i < iterations; ++i) {
             auto j = Tachyon::json::parse(data);
-            if (j.is_object()) checksum += 1; // Basic integrity check
+            if (j.is_array() || j.is_object()) checksum += 1;
         }
         auto end = high_resolution_clock::now();
         std::chrono::duration<double> diff = end - start;
         double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / diff.count();
-        results.push_back({"Tachyon v7.0", gb_s, checksum});
+        results.push_back({"Tachyon v7.2", gb_s, checksum});
     }
 
     // 2. Simdjson (On-Demand)
     {
 #if HAS_SIMDJSON
         simdjson::ondemand::parser parser;
-        simdjson::padded_string p_str(data);
         // Warmup
         {
-            auto doc = parser.iterate(p_str);
-            for (auto feature : doc["features"]) { (void)feature; }
+            auto doc = parser.iterate(padded_data);
+            for (auto x : doc) {}
         }
 
         auto start = high_resolution_clock::now();
         uint64_t checksum = 0;
         for (int i = 0; i < iterations; ++i) {
-            auto doc = parser.iterate(p_str);
-            // Iterate features to force parsing
-            for (auto feature : doc["features"]) {
-                 checksum++;
-            }
+            auto doc = parser.iterate(padded_data);
+            // Must iterate to parse
+            for (auto x : doc) { checksum++; }
         }
         auto end = high_resolution_clock::now();
         std::chrono::duration<double> diff = end - start;
         double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / diff.count();
-        results.push_back({"Simdjson (On-Demand)", gb_s, checksum});
+        results.push_back({"Simdjson (OD)", gb_s, checksum});
 #else
-        results.push_back({"Simdjson (On-Demand)", 0.0, 0});
+        results.push_back({"Simdjson (OD)", 0.0, 0});
 #endif
     }
 
-    // 3. Glaze (Generic)
+    // 3. Glaze
     {
 #if HAS_GLAZE
         glz::generic j;
-        // Warmup
         if (glz::read_json(j, data)) {}
 
         auto start = high_resolution_clock::now();
@@ -142,56 +123,38 @@ int main(int argc, char** argv) {
         for (int i = 0; i < iterations; ++i) {
             glz::generic j_doc;
             auto err = glz::read_json(j_doc, data);
-            if (!err) checksum += j_doc.size();
+            if (!err) checksum += 1;
         }
         auto end = high_resolution_clock::now();
         std::chrono::duration<double> diff = end - start;
         double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / diff.count();
-        results.push_back({"Glaze (Generic)", gb_s, checksum});
+        results.push_back({"Glaze", gb_s, checksum});
 #else
-        results.push_back({"Glaze (Generic)", 0.0, 0});
+        results.push_back({"Glaze", 0.0, 0});
 #endif
     }
-
-    // 4. Nlohmann
-    {
-#if HAS_NLOHMANN
-        // Warmup
-        auto j = nlohmann::json::parse(data);
-
-        auto start = high_resolution_clock::now();
-        uint64_t checksum = 0;
-        for (int i = 0; i < iterations; ++i) {
-            auto j_loop = nlohmann::json::parse(data);
-            checksum += j_loop.size();
-        }
-        auto end = high_resolution_clock::now();
-        std::chrono::duration<double> diff = end - start;
-        double gb_s = (data.size() * iterations) / (1024.0 * 1024.0 * 1024.0) / diff.count();
-        results.push_back({"Nlohmann", gb_s, checksum});
-#else
-        results.push_back({"Nlohmann", 0.0, 0});
-#endif
-    }
-
-    // Output Table
-    std::cout << std::left << std::setw(25) << "Library"
-              << std::setw(15) << "Throughput"
-              << std::setw(15) << "Status" << "\n";
-    std::cout << "-----------------------------------------------------------------\n";
 
     for (const auto& r : results) {
         std::cout << std::left << std::setw(25) << r.name;
         if (r.throughput_gb > 0.0) {
             std::cout << std::fixed << std::setprecision(2) << r.throughput_gb << " GB/s   ";
-            std::cout << "Verified";
         } else {
             std::cout << "N/A           ";
-            std::cout << "Not Found";
         }
         std::cout << "\n";
     }
     std::cout << "\n";
+}
+
+int main(int argc, char** argv) {
+    std::cout << "==============================================================\n";
+    std::cout << " Tachyon v7.2 ULTIMATE BENCHMARK\n";
+    std::cout << "==============================================================\n\n";
+
+    run_test("canada.json");
+    if (std::ifstream("large_file.json").good()) {
+        run_test("large_file.json");
+    }
 
     return 0;
 }
