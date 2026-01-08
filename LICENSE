@@ -1,7 +1,38 @@
-TACHYON PROPRIETARY SOURCE LICENSE v1.0
-Copyright (c) 2026 (BosyjJakub). All Rights Reserved.
+# TACHYON PROPRIETARY LICENSE (TPL)
+**Version 1.0**
+**Copyright (c) 2026 Tachyon Systems by WilkOlbrzym-Coder**
 
-1. PERMISSION: This software is free for personal and commercial use. You may integrate it into your applications.
-2. RESTRICTIONS: Redistribution of the source code, sub-licensing, or modifying the core ASM/SIMD kernels for use in other libraries is strictly prohibited.
-3. ATTRIBUTION: The original copyright notice must be retained in all copies of the source code.
-4. WARRANTY: THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+### 1. OWNERSHIP AND INTELLECTUAL PROPERTY
+The Tachyon JSON Library (the "Software"), including its source code, algorithms, and specifically its SIMD (AVX2/AVX-512) optimization cores, is the sole intellectual property of the Author (WilkOlbrzym-Coder). All rights are reserved globally.
+
+### 2. LICENSE GRANT
+The Author grants you a non-exclusive, non-transferable license to use the Software based on your annual gross revenue:
+
+*   **TIER 0 (Personal/Community):** If your annual gross revenue is **less than $1,000,000 USD**, you may use the Software for free, including for commercial projects. Attribution is required.
+*   **TIER 1 (Business):** Revenue **$1M - $5M USD**. Requires a one-time perpetual payment of **$2,499 USD** per product.
+*   **TIER 2 (Corporate):** Revenue **$5M - $20M USD**. Requires an annual subscription of **$3,999 USD**.
+*   **TIER 3 (Enterprise):** Revenue **$20M - $50M USD**. Requires an annual subscription of **$9,999 USD**.
+*   **TIER 4 (Titan):** Revenue **over $50M USD**. Requires an annual corporate site license of **$24,999 USD**.
+
+### 3. STRICT PROHIBITIONS
+Any violation of the following points results in immediate termination of the license and legal action:
+
+*   **NO EXTRACTION:** You are strictly forbidden from extracting parts of the code (specifically the SIMD structural kernels) to use in other projects or libraries.
+*   **NO MODIFICATION:** You may not modify the Software’s core logic. The Software must be used as provided.
+*   **NO REDISTRIBUTION:** You may not sell, sub-license, rent, or distribute the source code to any third party.
+*   **PERSONAL LICENSE:** A license granted to a specific company or individual is **not transferable**. Employees of a licensed company are NOT allowed to use the Software for their own separate businesses or private projects without a separate license.
+*   **NO REVERSE ENGINEERING:** You may not attempt to decompile or reverse engineer the logic of the structural bitmask generation.
+
+### 4. NO WARRANTY ("AS IS")
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. THE AUTHOR DOES NOT GUARANTEE 24/7 SUPPORT, IMMEDIATE BUG FIXES, OR CUSTOM FEATURE DEVELOPMENT. EVERY LICENSEE RECEIVES THE SAME PRODUCTION CODE.
+
+### 5. LIMITATION OF LIABILITY
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. YOU USE TACHYON AT YOUR OWN RISK.
+
+### 6. TERMINATION
+This license is effective until terminated. Your rights under this license will terminate automatically without notice if you fail to comply with any of its terms.
+
+***
+**Author:** WilkOlbrzym-Coder  
+**Brand:** Tachyon Systems  
+**Date:** January 2026
