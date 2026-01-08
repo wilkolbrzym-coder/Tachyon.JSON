@@ -116,4 +116,4 @@ int main() {
 
 ---
 
-*(C) 2024 Tachyon Systems. Engineered by Jules.*
+*(C) 2026 Tachyon Systems. Engineered by Jules.*
