@@ -1070,11 +1070,18 @@ namespace Tachyon {
             uint32_t start_off = (uint32_t)(s - base) + 1;
             const uint32_t* bitmask = l.doc->bitmask.get();
             size_t max_block = l.doc->bitmask_len;
-            size_t count = 1;
+            size_t count = 0;
             int depth = 1;
+            const char* first_element = s + 1;
             uint32_t block_idx = start_off / 32;
             uint32_t initial_mask = bitmask[block_idx];
             initial_mask &= ~((1U << (start_off % 32)) - 1);
+
+            auto check_end = [&](uint32_t curr_off) {
+                if (count > 0) return count + 1;
+                if (ASM::skip_whitespace(first_element, base + curr_off) < base + curr_off) return (size_t)1;
+                return (size_t)0;
+            };
 
             auto run_avx2 = [&](uint32_t mask) __attribute__((target("avx2"))) -> size_t {
                 const __m256i v_comma = _mm256_set1_epi8(',');
@@ -1089,26 +1096,40 @@ namespace Tachyon {
                         if (block_idx >= max_block) return 0;
                         mask = bitmask[block_idx];
                     }
-
-                    _mm_prefetch(base + block_idx * 32 + 1024, _MM_HINT_T0);
-
                     __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(base + block_idx * 32));
                     uint32_t m_comma = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v_comma));
                     uint32_t m_open = _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(chunk, v_lbra), _mm256_cmpeq_epi8(chunk, v_lcur)));
                     uint32_t m_close = _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(chunk, v_rbra), _mm256_cmpeq_epi8(chunk, v_rcur)));
 
-                    if (((m_open | m_close) & mask) == 0) {
-                        if (depth == 1) count += std::popcount(m_comma & mask);
-                        // If depth > 1, we ignore everything here as it's deep inside an object
-                    } else {
+                    if (depth == 1 && ((m_open | m_close) & mask) == 0) {
+                        count += std::popcount(m_comma & mask);
+                    }
+                    else if (depth > 1 && (m_close & mask) == 0) {
+                        depth += std::popcount(m_open & mask);
+                        block_idx++;
+                        if (block_idx >= max_block) break;
+                        mask = bitmask[block_idx];
+                        continue;
+                    }
+                    else {
                         uint32_t m_iter = mask;
                         while (m_iter != 0) {
                             int bit = std::countr_zero(m_iter);
                             uint32_t bit_mask = (1U << bit);
                             m_iter &= (m_iter - 1);
-                            if (m_comma & bit_mask) { if (depth == 1) count++; }
-                            else if (m_close & bit_mask) { depth--; if (depth == 0) return count; }
-                            else if (m_open & bit_mask) { depth++; }
+
+                            bool is_comma = (m_comma & bit_mask) != 0;
+                            bool is_close = (m_close & bit_mask) != 0;
+                            bool is_open  = (m_open & bit_mask) != 0;
+
+                            if (is_comma) {
+                                if (depth == 1) count++;
+                            } else if (is_close) {
+                                depth--;
+                                if (depth == 0) return check_end(block_idx * 32 + bit);
+                            } else if (is_open) {
+                                depth++;
+                            }
                         }
                     }
                     block_idx++;
@@ -1135,17 +1156,27 @@ namespace Tachyon {
                     uint64_t m64 = mask32;
                     m_comma &= 0xFFFFFFFF; m_open &= 0xFFFFFFFF; m_close &= 0xFFFFFFFF;
 
-                    if (((m_open | m_close) & m64) == 0) {
-                        if (depth == 1) count += std::popcount(m_comma & m64);
+                    if (depth == 1 && ((m_open | m_close) & m64) == 0) {
+                        count += std::popcount(m_comma & m64);
                     } else {
                         uint64_t m_iter = m64;
                         while (m_iter != 0) {
                             int bit = std::countr_zero(m_iter);
                             uint64_t bit_mask = (1ULL << bit);
                             m_iter &= (m_iter - 1);
-                            if (m_comma & bit_mask) { if (depth == 1) count++; }
-                            else if (m_close & bit_mask) { depth--; if (depth == 0) return count; }
-                            else if (m_open & bit_mask) { depth++; }
+
+                            bool is_comma = (m_comma & bit_mask) != 0;
+                            bool is_close = (m_close & bit_mask) != 0;
+                            bool is_open  = (m_open & bit_mask) != 0;
+
+                            if (is_comma) {
+                                if (depth == 1) count++;
+                            } else if (is_close) {
+                                depth--;
+                                if (depth == 0) return check_end(block_idx * 32 + bit);
+                            } else if (is_open) {
+                                depth++;
+                            }
                         }
                     }
                     block_idx++;
@@ -1169,17 +1200,33 @@ namespace Tachyon {
                     uint64_t m_open = _mm512_cmpeq_epi8_mask(chunk, v_lbra) | _mm512_cmpeq_epi8_mask(chunk, v_lcur);
                     uint64_t m_close = _mm512_cmpeq_epi8_mask(chunk, v_rbra) | _mm512_cmpeq_epi8_mask(chunk, v_rcur);
 
-                    if (((m_open | m_close) & mask64) == 0) {
-                        if (depth == 1) count += std::popcount(m_comma & mask64);
-                    } else {
+                    if (depth == 1 && ((m_open | m_close) & mask64) == 0) {
+                        count += std::popcount(m_comma & mask64);
+                    }
+                    else if (depth > 1 && (m_close & mask64) == 0) {
+                        depth += std::popcount(m_open & mask64);
+                        block_idx += 2;
+                        continue;
+                    }
+                    else {
                         uint64_t m_iter = mask64;
                         while (m_iter != 0) {
                             int bit = std::countr_zero(m_iter);
                             uint64_t bit_mask = (1ULL << bit);
                             m_iter &= (m_iter - 1);
-                            if (m_comma & bit_mask) { if (depth == 1) count++; }
-                            else if (m_close & bit_mask) { depth--; if (depth == 0) { _mm256_zeroupper(); return count; } }
-                            else if (m_open & bit_mask) { depth++; }
+
+                            bool is_comma = (m_comma & bit_mask) != 0;
+                            bool is_close = (m_close & bit_mask) != 0;
+                            bool is_open  = (m_open & bit_mask) != 0;
+
+                            if (is_comma) {
+                                if (depth == 1) count++;
+                            } else if (is_close) {
+                                depth--;
+                                if (depth == 0) { _mm256_zeroupper(); return check_end(block_idx * 32 + bit); }
+                            } else if (is_open) {
+                                depth++;
+                            }
                         }
                     }
                     block_idx += 2;
@@ -1204,9 +1251,19 @@ namespace Tachyon {
                             int bit = std::countr_zero(m_iter);
                             uint64_t bit_mask = (1ULL << bit);
                             m_iter &= (m_iter - 1);
-                            if (m_comma & bit_mask) { if (depth == 1) count++; }
-                            else if (m_close & bit_mask) { depth--; if (depth == 0) { _mm256_zeroupper(); return count; } }
-                            else if (m_open & bit_mask) { depth++; }
+
+                            bool is_comma = (m_comma & bit_mask) != 0;
+                            bool is_close = (m_close & bit_mask) != 0;
+                            bool is_open  = (m_open & bit_mask) != 0;
+
+                            if (is_comma) {
+                                if (depth == 1) count++;
+                            } else if (is_close) {
+                                depth--;
+                                if (depth == 0) { _mm256_zeroupper(); return check_end(block_idx * 32 + bit); }
+                            } else if (is_open) {
+                                depth++;
+                            }
                         }
                     }
                 }
