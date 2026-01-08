@@ -3,7 +3,7 @@
 
 // TACHYON 0.7.2 "QUASAR" - MISSION CRITICAL
 // The World's Fastest JSON Library
-// (C) 2024 Tachyon Systems
+// (C) 2026 Tachyon Systems by WilkOlbrzym-Coder
 
 #include <iostream>
 #include <vector>
