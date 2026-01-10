@@ -69,6 +69,7 @@ class Scanner {
 public:
     static constexpr auto pow10_table = detail::generate_pow10();
     static constexpr auto neg_pow10_table = detail::generate_neg_pow10();
+
     const char* cursor;
     const char* end;
 
@@ -244,8 +245,6 @@ public:
         if (*cursor == '-') { negative = true; cursor++; }
 
         uint64_t mantissa = 0;
-
-        // Unroll 8x digit read (Scalar)
         if (static_cast<uint8_t>(*cursor - '0') < 10) {
             mantissa = (*cursor++ - '0');
             while (static_cast<uint8_t>(*cursor - '0') < 10) {
@@ -271,18 +270,10 @@ public:
 
         if (exponent == 0) return d;
         if (exponent > 0 && exponent <= detail::MAX_EXP) return d * pow10_table[exponent];
+        // Use division for negative exponent to match fast_float precision better
         if (exponent < 0 && exponent >= -detail::MAX_EXP) return d / pow10_table[-exponent];
 
-        // Fallback for extreme exponents
-        if (exponent > 0) {
-            double p = 10.0;
-            for(int i=1; i<exponent; ++i) p *= 10.0;
-            return d * p;
-        } else {
-            double p = 10.0;
-            for(int i=1; i<-exponent; ++i) p *= 10.0;
-            return d / p;
-        }
+        return d * std::pow(10.0, exponent);
     }
 
     TACHYON_ALWAYS_INLINE char peek() const { return *cursor; }
@@ -388,36 +379,47 @@ TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& v
     if (*s.cursor != '[') throw Error("Expected [");
     s.cursor++;
     val.clear();
-    val.reserve(1);
+    val.reserve(1); // Polygons
 
     if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
     if (*s.cursor == ']') { s.cursor++; return; }
 
     while(true) {
-        // Level 2: Rings
+        // Level 2: Rings (Vector of Points)
         val.emplace_back();
         auto& l2 = val.back();
 
         if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
         if (*s.cursor != '[') throw Error("Expected [");
         s.cursor++;
-        l2.reserve(512);
+        l2.reserve(1024); // Large reserve for points
+
+        // Prefetch ahead
+        _mm_prefetch(s.cursor + 64, _MM_HINT_T0);
 
         if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
         if (*s.cursor != ']') {
             while(true) {
                 // Level 3: Points [x, y]
-                l2.emplace_back();
-                auto& l3 = l2.back();
-                l3.reserve(2);
+                // "Unsafe" mode: parse X, comma, Y, ] directly with inline code.
+                // Avoid emplace_back overhead by resize + direct access.
 
-                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
-                if (*s.cursor != '[') throw Error("Expected [");
-                s.cursor++;
+                // Get pointer to next element in l2
+                size_t old_size = l2.size();
+                l2.resize(old_size + 1);
+                std::vector<double>& pt = l2[old_size];
+                pt.resize(2); // Pre-allocate 2 doubles
+                double* dptr = pt.data();
 
-                // Parse First Double (x)
+                // Expect [
+                // assume consumed or whitespace skipped?
+                // The previous loop end or start handles [
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
-                // INLINED PARSE DOUBLE (x)
+                if (*s.cursor == '[') s.cursor++;
+                else throw Error("Expected [");
+
+                // Parse X (Inline Fused)
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
                 {
                     bool neg = false; if (*s.cursor == '-') { neg = true; s.cursor++; }
                     uint64_t m = 0;
@@ -432,15 +434,18 @@ TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& v
                     double d = (double)m;
                     if (neg) d = -d;
                     if (e < 0 && e >= -detail::MAX_EXP) d /= Scanner::pow10_table[-e];
-                    l3.push_back(d);
+                    dptr[0] = d;
                 }
 
-                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                // Expect Comma (Fast skip)
                 if (*s.cursor == ',') s.cursor++;
+                else if (static_cast<uint8_t>(*s.cursor) <= 0x20) {
+                    s.skip_whitespace();
+                    if (*s.cursor == ',') s.cursor++;
+                }
 
-                // Parse Second Double (y)
+                // Parse Y (Inline Fused)
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
-                // INLINED PARSE DOUBLE (y)
                 {
                     bool neg = false; if (*s.cursor == '-') { neg = true; s.cursor++; }
                     uint64_t m = 0;
@@ -455,13 +460,15 @@ TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& v
                     double d = (double)m;
                     if (neg) d = -d;
                     if (e < 0 && e >= -detail::MAX_EXP) d /= Scanner::pow10_table[-e];
-                    l3.push_back(d);
+                    dptr[1] = d;
                 }
 
+                // Expect ]
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
                 if (*s.cursor == ']') s.cursor++;
-                else throw Error("Expected ]");
 
+                // Check Ring end
+                // We are at end of Point. Next is comma (next point) or ] (end of ring).
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
                 char c = *s.cursor;
                 if (c == ',') { s.cursor++; continue; }
@@ -478,7 +485,6 @@ TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& v
     }
 }
 
-// Optimized specialized vector<double>
 template<>
 TACHYON_ALWAYS_INLINE void read(std::vector<double>& val, Scanner& s) {
     if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
@@ -490,7 +496,6 @@ TACHYON_ALWAYS_INLINE void read(std::vector<double>& val, Scanner& s) {
         if (*s.cursor == ']') { s.cursor++; return; }
         while (true) {
             val.push_back(s.parse_double());
-
             if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
             char c = *s.cursor;
             if (c == ',') { s.cursor++; if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace(); continue; }
