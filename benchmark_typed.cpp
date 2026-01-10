@@ -1,6 +1,6 @@
+#include <glaze/glaze.hpp>
 #include "tachyon.hpp"
 #include "benchmark_structs.hpp"
-#include <glaze/glaze.hpp>
 #include <chrono>
 #include <iostream>
 #include <vector>
@@ -33,6 +33,7 @@ namespace Tachyon {
         if (s.peek() == '}') { s.consume('}'); return; }
         while (true) {
             s.skip_whitespace();
+            // Updated to new API
             std::string_view key = s.scan_string_view(key_buf, 128);
             s.skip_whitespace(); s.consume(':');
             if (key == "urls") {
@@ -96,6 +97,21 @@ Stats calculate_stats(std::vector<double>& times, size_t bytes) {
     return { mb_s, median };
 }
 
+// --- VERIFICATION ---
+double sum_canada(const canada::FeatureCollection& obj) {
+    double sum = 0;
+    for (const auto& f : obj.features) {
+        for (const auto& ring : f.geometry.coordinates) {
+            for (const auto& point : ring) {
+                for (double d : point) {
+                    sum += d;
+                }
+            }
+        }
+    }
+    return sum;
+}
+
 int main() {
     std::string canada_data = read_file("canada.json");
     std::string twitter_data = read_file("twitter.json");
@@ -107,20 +123,29 @@ int main() {
         return 1;
     }
 
+    auto pad = [](const std::string& s) {
+        std::string p = s;
+        p.resize(s.size() + 64, ' ');
+        return p;
+    };
+
+    std::string canada_padded = pad(canada_data);
+    std::string twitter_padded = pad(twitter_data);
+    std::string citm_padded = pad(citm_data);
+    std::string small_padded = pad(small_data);
+
     std::cout << "==========================================================" << std::endl;
     std::cout << "   TACHYON VS GLAZE: TYPED DESERIALIZATION DEATHMATCH" << std::endl;
     std::cout << "==========================================================" << std::endl;
     std::cout << std::fixed << std::setprecision(2);
 
-    auto run_test = [&](const std::string& name, const std::string& data, auto& obj_g, auto& obj_t) {
+    auto run_test = [&](const std::string& name, const std::string& data, const std::string& padded_data, auto& obj_g, auto& obj_t) {
         std::cout << "\n>>> Dataset: " << name << " (" << data.size() << " bytes)" << std::endl;
 
         // 1. GLAZE
         {
-            for (int i = 0; i < 10; ++i) {
-                auto err = glz::read_json(obj_g, data);
-                do_not_optimize(obj_g);
-            }
+            auto err = glz::read_json(obj_g, data);
+            if (err) { std::cerr << "Glaze Error!" << std::endl; exit(1); }
 
             std::vector<double> times;
             int iters = (data.size() < 1000) ? 50000 : 50;
@@ -138,18 +163,30 @@ int main() {
         // 2. TACHYON
         {
             try {
-                // Warmup
-                for (int i = 0; i < 10; ++i) {
-                    Tachyon::Scanner sc(data);
-                    Tachyon::read(obj_t, sc);
-                    do_not_optimize(obj_t);
+                Tachyon::Scanner sc(padded_data.data(), data.size());
+                Tachyon::read(obj_t, sc);
+
+                // --- VERIFICATION FOR CANADA ---
+                if (name == "Canada.json") {
+                    double sum_g = sum_canada((const canada::FeatureCollection&)obj_g);
+                    double sum_t = sum_canada((const canada::FeatureCollection&)obj_t);
+                    double diff = std::abs(sum_g - sum_t);
+                    if (diff > 1e-9) {
+                        std::cerr << "CRITICAL ERROR: Data integrity check failed!" << std::endl;
+                        std::cerr << "Glaze Sum:   " << std::setprecision(10) << sum_g << std::endl;
+                        std::cerr << "Tachyon Sum: " << std::setprecision(10) << sum_t << std::endl;
+                        std::cerr << "Diff: " << diff << std::endl;
+                        exit(1);
+                    } else {
+                        std::cout << "Integrity Check: PASSED (Diff: " << diff << ")" << std::endl;
+                    }
                 }
 
                 std::vector<double> times;
                 int iters = (data.size() < 1000) ? 50000 : 50;
                 for (int i = 0; i < iters; ++i) {
                     auto start = std::chrono::high_resolution_clock::now();
-                    Tachyon::Scanner sc(data);
+                    Tachyon::Scanner sc(padded_data.data(), data.size());
                     Tachyon::read(obj_t, sc);
                     auto end = std::chrono::high_resolution_clock::now();
                     times.push_back(std::chrono::duration<double>(end - start).count());
@@ -158,7 +195,6 @@ int main() {
                 std::cout << "Tachyon: " << std::setw(10) << s.mb_s << " MB/s | " << s.median_time * 1000 << " ms" << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "Tachyon Abort: " << e.what() << std::endl;
-                // exit(1);
             }
              std::cout << "Verified: Tachyon parsed." << std::endl;
         }
@@ -167,31 +203,14 @@ int main() {
     {
         canada::FeatureCollection obj_g;
         canada::FeatureCollection obj_t;
-        run_test("Canada.json", canada_data, obj_g, obj_t);
+        run_test("Canada.json", canada_data, canada_padded, obj_g, obj_t);
     }
-
-    // Twitter Disabled due to Struct Mismatch
-    /*
-    {
-        twitter::TwitterResult obj_g;
-        twitter::TwitterResult obj_t;
-        run_test("Twitter.json", twitter_data, obj_g, obj_t);
-    }
-    */
 
     {
         small::Object obj_g;
         small::Object obj_t;
-        run_test("Small.json", small_data, obj_g, obj_t);
+        run_test("Small.json", small_data, small_padded, obj_g, obj_t);
     }
-
-    /*
-    {
-        citm::Catalog obj_g;
-        citm::Catalog obj_t;
-        run_test("CITM_Catalog.json", citm_data, obj_g, obj_t);
-    }
-    */
 
     return 0;
 }

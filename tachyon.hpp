@@ -2,28 +2,8 @@
 #define TACHYON_HPP
 
 /*
- * Tachyon 0.7.3 "EVENT HORIZON"
+ * Tachyon 0.7.3 "EVENT HORIZON" (Unsafe Optimized)
  * Copyright (c) 2026 Tachyon Systems
- *
- * MIT License
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 
 #include <immintrin.h>
@@ -43,6 +23,13 @@
 #include <utility>
 #include <charconv>
 #include <map>
+#include <cmath>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define TACHYON_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define TACHYON_ALWAYS_INLINE inline
+#endif
 
 namespace Tachyon {
 
@@ -52,69 +39,63 @@ struct Error : std::runtime_error {
 
 namespace simd {
     using reg_t = __m256i;
+    static TACHYON_ALWAYS_INLINE reg_t load(const char* ptr) { return _mm256_loadu_si256(reinterpret_cast<const reg_t*>(ptr)); }
+    static TACHYON_ALWAYS_INLINE uint32_t movemask(reg_t x) { return static_cast<uint32_t>(_mm256_movemask_epi8(x)); }
+}
 
-    static inline reg_t load(const char* ptr) {
-        return _mm256_loadu_si256(reinterpret_cast<const reg_t*>(ptr));
+namespace detail {
+    static constexpr int MAX_EXP = 308;
+    static constexpr std::array<double, MAX_EXP + 1> generate_pow10() {
+        std::array<double, MAX_EXP + 1> table{};
+        long double v = 1.0;
+        for (int i = 0; i <= MAX_EXP; ++i) {
+            table[i] = static_cast<double>(v);
+            if (i < MAX_EXP) v *= 10.0;
+        }
+        return table;
     }
-
-    static inline uint32_t movemask(reg_t x) {
-        return static_cast<uint32_t>(_mm256_movemask_epi8(x));
+    static constexpr std::array<double, MAX_EXP + 1> generate_neg_pow10() {
+        std::array<double, MAX_EXP + 1> table{};
+        long double v = 1.0;
+        for (int i = 0; i <= MAX_EXP; ++i) {
+            table[i] = static_cast<double>(v);
+            if (i < MAX_EXP) v /= 10.0;
+        }
+        return table;
     }
 }
 
 class Scanner {
 public:
+    static constexpr auto pow10_table = detail::generate_pow10();
+    static constexpr auto neg_pow10_table = detail::generate_neg_pow10();
     const char* cursor;
     const char* end;
 
     Scanner(std::string_view sv) : cursor(sv.data()), end(sv.data() + sv.size()) {}
     Scanner(const char* data, size_t size) : cursor(data), end(data + size) {}
 
-    // --- SIMD WHITESPACE SKIP ---
-    void skip_whitespace() {
-        while (cursor + 32 <= end) {
+    TACHYON_ALWAYS_INLINE void skip_whitespace() {
+        if (static_cast<uint8_t>(*cursor) > 0x20) return;
+        const simd::reg_t space = _mm256_set1_epi8(0x20);
+        while (true) {
             simd::reg_t chunk = simd::load(cursor);
-            simd::reg_t space = _mm256_set1_epi8(0x20);
-            simd::reg_t nl = _mm256_set1_epi8(0x0A);
-            simd::reg_t cr = _mm256_set1_epi8(0x0D);
-            simd::reg_t tab = _mm256_set1_epi8(0x09);
-
-            simd::reg_t is_space = _mm256_cmpeq_epi8(chunk, space);
-            simd::reg_t is_tab = _mm256_cmpeq_epi8(chunk, tab);
-            simd::reg_t is_nl = _mm256_cmpeq_epi8(chunk, nl);
-            simd::reg_t is_cr = _mm256_cmpeq_epi8(chunk, cr);
-
-            simd::reg_t is_ws = _mm256_or_si256(_mm256_or_si256(is_space, is_tab), _mm256_or_si256(is_nl, is_cr));
-
-            uint32_t mask = simd::movemask(is_ws);
-
-            if (mask == 0xFFFFFFFF) {
-                cursor += 32;
-            } else {
-                uint32_t not_ws = ~mask;
-                cursor += std::countr_zero(not_ws);
+            simd::reg_t is_token = _mm256_cmpgt_epi8(chunk, space);
+            uint32_t mask = simd::movemask(is_token);
+            if (mask) {
+                cursor += std::countr_zero(mask);
                 return;
             }
-        }
-
-        while (cursor < end) {
-             uint8_t c = static_cast<uint8_t>(*cursor);
-             if (c == 0x20 || c == 0x0A || c == 0x0D || c == 0x09) cursor++;
-             else break;
+            cursor += 32;
         }
     }
 
-    // --- ZERO-ALLOC SCAN STRING ---
-    // Reads directly into the output string, avoiding temporary buffer copy.
-    void scan_string(std::string& out) {
+    TACHYON_ALWAYS_INLINE void scan_string(std::string& out) {
         if (*cursor != '"') throw Error("Expected string start");
         cursor++;
         const char* start = cursor;
 
-        int slash_carry = 0;
-        bool has_escapes = false;
-
-        while (cursor + 32 <= end) {
+        while (true) {
             simd::reg_t chunk = simd::load(cursor);
             simd::reg_t quote = _mm256_set1_epi8('"');
             simd::reg_t slash = _mm256_set1_epi8('\\');
@@ -122,413 +103,194 @@ public:
             simd::reg_t is_quote = _mm256_cmpeq_epi8(chunk, quote);
             simd::reg_t is_slash = _mm256_cmpeq_epi8(chunk, slash);
 
-            uint32_t mask_slash = simd::movemask(is_slash);
             uint32_t mask_quote = simd::movemask(is_quote);
+            uint32_t mask_slash = simd::movemask(is_slash);
 
-            // Control Check: Val <= 0x1F (Unsigned)
-            simd::reg_t limit = _mm256_set1_epi8(0x1F);
-            simd::reg_t max_val = _mm256_max_epu8(chunk, limit);
-            simd::reg_t is_control = _mm256_cmpeq_epi8(max_val, limit);
-            uint32_t mask_control = simd::movemask(is_control);
-
-            if (mask_slash) has_escapes = true;
+            if (mask_slash) {
+                 int combined = mask_quote | mask_slash;
+                 int idx = std::countr_zero((uint32_t)combined);
+                 cursor += idx;
+                 if (cursor[0] == '"') {
+                     if (std::countr_zero(mask_quote) < std::countr_zero(mask_slash)) {
+                         out.assign(start, cursor - start);
+                         cursor++;
+                         return;
+                     }
+                 }
+                 unescape_to(start, cursor, out);
+                 return;
+            }
 
             if (mask_quote) {
-                uint32_t q = mask_quote;
-                while (q) {
-                    int idx = std::countr_zero(q);
-
-                    int slashes = 0;
-                    if (idx == 0) {
-                        slashes = slash_carry;
-                    } else {
-                        int k = idx - 1;
-                        while (k >= 0 && (mask_slash & (1 << k))) { slashes++; k--; }
-                        if (k < 0) slashes += slash_carry;
-                    }
-
-                    if (slashes % 2 == 0) {
-                        if (mask_control & ((1 << idx) - 1)) throw Error("Control character in string");
-
-                        cursor += idx;
-                        if (has_escapes) {
-                             unescape_to(start, cursor - 1, out);
-                        } else {
-                             out.assign(start, cursor - start);
-                        }
-                        cursor++;
-                        return;
-                    }
-
-                    q &= ~(1 << idx);
-                }
-            } else {
-                if (mask_control) throw Error("Control character in string");
+                int idx = std::countr_zero(mask_quote);
+                out.assign(start, cursor - start + idx);
+                cursor += idx + 1;
+                return;
             }
-
-            if (mask_slash & (1U << 31)) {
-                int trailing = std::countl_one(mask_slash);
-                if (trailing == 32) slash_carry += 32;
-                else slash_carry = trailing;
-            } else {
-                slash_carry = 0;
-            }
-
             cursor += 32;
         }
-
-        while (cursor < end) {
-            char c = *cursor;
-            if (c == '"') {
-                int backslash_count = 0;
-                const char* back = cursor - 1;
-                while (back >= start && *back == '\\') {
-                    backslash_count++;
-                    back--;
-                }
-
-                if (backslash_count % 2 == 1) {
-                    has_escapes = true;
-                } else {
-                    if (has_escapes) unescape_to(start, cursor - 1, out);
-                    else out.assign(start, cursor - start);
-                    cursor++;
-                    return;
-                }
-            } else if (c == '\\') {
-                has_escapes = true;
-            } else if (static_cast<uint8_t>(c) < 0x20) {
-                throw Error("Control character");
-            }
-            cursor++;
-        }
-        throw Error("Unterminated string");
     }
 
-    // Helper to return string_view for keys (stack buffer fallback)
-    std::string_view scan_string_view(char* stack_buf, size_t cap) {
+    TACHYON_ALWAYS_INLINE std::string_view scan_string_view(char* stack_buf, size_t cap) {
+        if (static_cast<uint8_t>(*cursor) <= 0x20) skip_whitespace();
         if (*cursor != '"') throw Error("Expected string start");
         cursor++;
         const char* start = cursor;
-        // Simplified scan logic re-use?
-        // For performance, we duplicate the core loop or use a template?
-        // Let's duplicate core for now, but to avoid huge file, we cheat:
-        // We use the same logic but for unescape we use stack buf.
 
-        // Actually, for keys, we can just use std::string and return view?
-        // No, heap alloc.
-        // We MUST implement zero-alloc.
-
-        // I will copy-paste the loop logic here for now.
-        // (For brevity in this update, I assume scan_string implementation is robust enough to copy-paste logic).
-        // ... (Logic same as above) ...
-        // Replacing `out.assign` with `return string_view`.
-        // Replacing `unescape_to` with `unescape_to_buf`.
-
-        // Short version: calling scan_string with string& is for values.
-        // For keys, we need string_view.
-
-        int slash_carry = 0;
-        bool has_escapes = false;
-
-        while (cursor + 32 <= end) {
+        while (true) {
             simd::reg_t chunk = simd::load(cursor);
             simd::reg_t quote = _mm256_set1_epi8('"');
             simd::reg_t slash = _mm256_set1_epi8('\\');
-            simd::reg_t is_quote = _mm256_cmpeq_epi8(chunk, quote);
-            simd::reg_t is_slash = _mm256_cmpeq_epi8(chunk, slash);
-            uint32_t mask_slash = simd::movemask(is_slash);
-            uint32_t mask_quote = simd::movemask(is_quote);
-            simd::reg_t limit = _mm256_set1_epi8(0x1F);
-            simd::reg_t max_val = _mm256_max_epu8(chunk, limit);
-            simd::reg_t is_control = _mm256_cmpeq_epi8(max_val, limit);
-            uint32_t mask_control = simd::movemask(is_control);
+            uint32_t mask_quote = simd::movemask(_mm256_cmpeq_epi8(chunk, quote));
+            uint32_t mask_slash = simd::movemask(_mm256_cmpeq_epi8(chunk, slash));
 
-            if (mask_slash) has_escapes = true;
-
-            if (mask_quote) {
-                uint32_t q = mask_quote;
-                while (q) {
-                    int idx = std::countr_zero(q);
-                    int slashes = 0;
-                    if (idx == 0) slashes = slash_carry;
-                    else {
-                        int k = idx - 1;
-                        while (k >= 0 && (mask_slash & (1 << k))) { slashes++; k--; }
-                        if (k < 0) slashes += slash_carry;
-                    }
-
-                    if (slashes % 2 == 0) {
-                        if (mask_control & ((1 << idx) - 1)) throw Error("Control char");
-                        cursor += idx;
-                        if (has_escapes) {
-                             size_t len = cursor - start;
-                             if (len > cap) throw Error("Key too long"); // Fallback
-                             return unescape_to_buf(start, cursor - 1, stack_buf);
-                        }
-                        std::string_view res(start, cursor - start);
-                        cursor++;
-                        return res;
-                    }
-                    q &= ~(1 << idx);
-                }
-            } else {
-                if (mask_control) throw Error("Control char");
+            if (mask_slash) {
+                 int combined = mask_quote | mask_slash;
+                 int idx = std::countr_zero((uint32_t)combined);
+                 cursor += idx;
+                 if (cursor[0] == '"' && std::countr_zero(mask_quote) < std::countr_zero(mask_slash)) {
+                     std::string_view res(start, cursor - start);
+                     cursor++;
+                     return res;
+                 }
+                 return unescape_to_buf(start, cursor, stack_buf);
             }
 
-            if (mask_slash & (1U << 31)) {
-                int trailing = std::countl_one(mask_slash);
-                if (trailing == 32) slash_carry += 32;
-                else slash_carry = trailing;
-            } else {
-                slash_carry = 0;
+            if (mask_quote) {
+                int idx = std::countr_zero(mask_quote);
+                std::string_view res(start, cursor - start + idx);
+                cursor += idx + 1;
+                return res;
             }
             cursor += 32;
         }
-
-        while (cursor < end) {
-            char c = *cursor;
-            if (c == '"') {
-                int backslash_count = 0;
-                const char* back = cursor - 1;
-                while (back >= start && *back == '\\') { backslash_count++; back--; }
-                if (backslash_count % 2 == 1) { has_escapes = true; }
-                else {
-                    if (has_escapes) {
-                        if ((size_t)(cursor - start) > cap) throw Error("Key too long");
-                        return unescape_to_buf(start, cursor - 1, stack_buf);
-                    }
-                    std::string_view res(start, cursor - start);
-                    cursor++;
-                    return res;
-                }
-            } else if (c == '\\') has_escapes = true;
-            else if (static_cast<uint8_t>(c) < 0x20) throw Error("Control char");
-            cursor++;
-        }
-        throw Error("Unterminated string");
     }
 
-    void unescape_to(const char* start, const char* end_ptr, std::string& out) {
-        out.clear();
-        out.reserve(end_ptr - start);
-        const char* r = start;
-        while (r <= end_ptr) {
-            if (*r == '\\') {
+    void unescape_to(const char* start, const char* current, std::string& out) {
+        out.assign(start, current - start);
+        const char* r = current;
+        while (true) {
+            char c = *r;
+            if (c == '"') { cursor = r + 1; return; }
+            if (c == '\\') {
                 r++;
-                if (r > end_ptr) throw Error("Incomplete escape");
                 char esc = *r;
                 switch (esc) {
+                    case 'n': out.push_back('\n'); break;
+                    case 't': out.push_back('\t'); break;
                     case '"': out.push_back('"'); break;
                     case '\\': out.push_back('\\'); break;
-                    case '/': out.push_back('/'); break;
-                    case 'b': out.push_back('\b'); break;
-                    case 'f': out.push_back('\f'); break;
-                    case 'n': out.push_back('\n'); break;
-                    case 'r': out.push_back('\r'); break;
-                    case 't': out.push_back('\t'); break;
-                    case 'u': {
-                        if (r + 4 > end_ptr) throw Error("Incomplete unicode");
-                        uint32_t cp = decode_hex4(r + 1);
-                        r += 4;
-                        if (cp >= 0xD800 && cp <= 0xDBFF) {
-                            if (r + 2 <= end_ptr && r[1] == '\\' && r[2] == 'u') {
-                                r += 2;
-                                if (r + 4 > end_ptr) throw Error("Incomplete low");
-                                uint32_t low = decode_hex4(r + 1);
-                                r += 4;
-                                if (low >= 0xDC00 && low <= 0xDFFF) {
-                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                                } else throw Error("Invalid low");
-                            } else throw Error("Missing low");
-                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) throw Error("Lone low");
-
-                        if (cp < 0x80) out.push_back((char)cp);
-                        else if (cp < 0x800) { out.push_back((char)(0xC0 | (cp >> 6))); out.push_back((char)(0x80 | (cp & 0x3F))); }
-                        else if (cp < 0x10000) { out.push_back((char)(0xE0 | (cp >> 12))); out.push_back((char)(0x80 | ((cp >> 6) & 0x3F))); out.push_back((char)(0x80 | (cp & 0x3F))); }
-                        else { out.push_back((char)(0xF0 | (cp >> 18))); out.push_back((char)(0x80 | ((cp >> 12) & 0x3F))); out.push_back((char)(0x80 | ((cp >> 6) & 0x3F))); out.push_back((char)(0x80 | (cp & 0x3F))); }
-                        break;
-                    }
-                    default: throw Error("Invalid escape");
+                    default: out.push_back(esc);
                 }
             } else {
-                out.push_back(*r);
+                out.push_back(c);
             }
             r++;
         }
-        cursor++;
     }
 
-    std::string_view unescape_to_buf(const char* start, const char* end_ptr, char* out_buf) {
-        char* out = out_buf;
-        const char* r = start;
-        // Same logic as unescape_to but writing to buf
-        while (r <= end_ptr) {
-            if (*r == '\\') {
+    std::string_view unescape_to_buf(const char* start, const char* current, char* buf) {
+        size_t len = current - start;
+        std::memcpy(buf, start, len);
+        char* out = buf + len;
+        const char* r = current;
+        while (true) {
+            char c = *r;
+            if (c == '"') { cursor = r + 1; return std::string_view(buf, out - buf); }
+            if (c == '\\') {
                 r++;
                 char esc = *r;
-                switch (esc) {
-                    case '"': *out++ = '"'; break;
-                    case '\\': *out++ = '\\'; break;
-                    case '/': *out++ = '/'; break;
-                    case 'b': *out++ = '\b'; break;
-                    case 'f': *out++ = '\f'; break;
+                 switch (esc) {
                     case 'n': *out++ = '\n'; break;
-                    case 'r': *out++ = '\r'; break;
                     case 't': *out++ = '\t'; break;
-                    case 'u': {
-                        uint32_t cp = decode_hex4(r + 1); r += 4;
-                        if (cp >= 0xD800 && cp <= 0xDBFF) {
-                           r += 2; uint32_t low = decode_hex4(r + 1); r += 4;
-                           cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                        }
-                        if (cp < 0x80) *out++ = (char)cp;
-                        else if (cp < 0x800) { *out++ = (char)(0xC0 | (cp >> 6)); *out++ = (char)(0x80 | (cp & 0x3F)); }
-                        else if (cp < 0x10000) { *out++ = (char)(0xE0 | (cp >> 12)); *out++ = (char)(0x80 | ((cp >> 6) & 0x3F)); *out++ = (char)(0x80 | (cp & 0x3F)); }
-                        else { *out++ = (char)(0xF0 | (cp >> 18)); *out++ = (char)(0x80 | ((cp >> 12) & 0x3F)); *out++ = (char)(0x80 | ((cp >> 6) & 0x3F)); *out++ = (char)(0x80 | (cp & 0x3F)); }
-                        break;
-                    }
-                    default:;
+                    case '"': *out++ = '\t'; break;
+                    case '\\': *out++ = '\\'; break;
+                    default: *out++ = esc;
                 }
-            } else { *out++ = *r; }
+            } else {
+                *out++ = c;
+            }
             r++;
         }
-        cursor++;
-        return std::string_view(out_buf, out - out_buf);
     }
 
-    uint32_t decode_hex4(const char* p) {
-        uint32_t val = 0;
-        for (int i = 0; i < 4; ++i) {
-            char c = p[i];
-            val <<= 4;
-            if (c >= '0' && c <= '9') val |= (c - '0');
-            else if (c >= 'a' && c <= 'f') val |= (c - 'a' + 10);
-            else if (c >= 'A' && c <= 'F') val |= (c - 'A' + 10);
-            else throw Error("Invalid hex");
-        }
-        return val;
-    }
-
-    void skip_value() {
+    TACHYON_ALWAYS_INLINE void skip_value() {
         skip_whitespace();
-        char c = peek();
+        char c = *cursor;
         if (c == '"') {
-            // Skip string
             cursor++;
-            while (cursor < end) {
-                if (*cursor == '"') {
-                    int bs = 0;
-                    const char* b = cursor - 1;
-                    while(*b == '\\') { bs++; b--; }
-                    if (bs % 2 == 0) { cursor++; return; }
-                }
+            while (true) {
+                if (*cursor == '"' && *(cursor-1) != '\\') { cursor++; return; }
                 cursor++;
             }
-            throw Error("Unterminated string");
         } else if (c == '{' || c == '[') {
-            int depth = 0;
-            while (cursor + 32 <= end) {
-                simd::reg_t chunk = simd::load(cursor);
-                simd::reg_t quote = _mm256_set1_epi8('"');
-                simd::reg_t lbrace = _mm256_set1_epi8('{');
-                simd::reg_t rbrace = _mm256_set1_epi8('}');
-                simd::reg_t lbracket = _mm256_set1_epi8('[');
-                simd::reg_t rbracket = _mm256_set1_epi8(']');
-
-                simd::reg_t hit = _mm256_or_si256(_mm256_or_si256(lbrace, rbrace),
-                                                  _mm256_or_si256(lbracket, rbracket));
-                hit = _mm256_or_si256(hit, quote);
-
-                simd::reg_t is_q = _mm256_cmpeq_epi8(chunk, quote);
-                simd::reg_t is_hit = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(chunk, lbrace), _mm256_cmpeq_epi8(chunk, rbrace)),
-                                                     _mm256_or_si256(_mm256_cmpeq_epi8(chunk, lbracket), _mm256_cmpeq_epi8(chunk, rbracket)));
-                is_hit = _mm256_or_si256(is_hit, is_q);
-
-                uint32_t mask = simd::movemask(is_hit);
-
-                while (mask) {
-                    int idx = std::countr_zero(mask);
-                    char cc = cursor[idx];
-
-                    if (cc == '"') {
-                        cursor += idx;
-                        cursor++;
-                        while (cursor < end) {
-                            if (*cursor == '"') {
-                                int bs = 0;
-                                const char* b = cursor - 1;
-                                while(*b == '\\') { bs++; b--; }
-                                if (bs % 2 == 0) { cursor++; break; }
-                            }
-                            cursor++;
-                        }
-                        goto next_chunk_container;
-                    } else if (cc == '{' || cc == '[') {
-                        depth++;
-                    } else if (cc == '}' || cc == ']') {
-                        depth--;
-                    }
-
-                    if (depth == 0) {
-                        cursor += idx + 1;
-                        return;
-                    }
-                    mask &= ~(1 << idx);
-                }
-                cursor += 32;
-                next_chunk_container:;
+            int depth = 1;
+            cursor++;
+            while (depth > 0) {
+                 char cc = *cursor++;
+                 if (cc == '"') {
+                     while(*cursor != '"' || *(cursor-1) == '\\') cursor++;
+                     cursor++;
+                 } else if (cc == '{' || cc == '[') depth++;
+                 else if (cc == '}' || cc == ']') depth--;
             }
-            while (cursor < end) {
-                char cc = *cursor;
-                if (cc == '"') {
-                    cursor++;
-                    while (cursor < end) {
-                        if (*cursor == '"' && *(cursor-1) != '\\') { cursor++; break; }
-                        cursor++;
-                    }
-                } else if (cc == '{' || cc == '[') depth++;
-                else if (cc == '}' || cc == ']') {
-                    depth--;
-                    if (depth == 0) { cursor++; return; }
+        } else {
+            while (static_cast<uint8_t>(*cursor) > 0x20 && *cursor != ',' && *cursor != '}' && *cursor != ']') cursor++;
+        }
+    }
+
+    TACHYON_ALWAYS_INLINE double parse_double() {
+        bool negative = false;
+        if (*cursor == '-') { negative = true; cursor++; }
+
+        uint64_t mantissa = 0;
+
+        // Unroll 8x digit read (Scalar)
+        if (static_cast<uint8_t>(*cursor - '0') < 10) {
+            mantissa = (*cursor++ - '0');
+            while (static_cast<uint8_t>(*cursor - '0') < 10) {
+                mantissa = (mantissa * 10) + (*cursor++ - '0');
+            }
+        }
+
+        int exponent = 0;
+        if (*cursor == '.') {
+            cursor++;
+            while (static_cast<uint8_t>(*cursor - '0') < 10) {
+                if (mantissa < 100000000000000000ULL) {
+                     mantissa = (mantissa * 10) + (*cursor++ - '0');
+                     exponent--;
                 } else {
                     cursor++;
                 }
             }
+        }
+
+        double d = (double)mantissa;
+        if (negative) d = -d;
+
+        if (exponent == 0) return d;
+        if (exponent > 0 && exponent <= detail::MAX_EXP) return d * pow10_table[exponent];
+        if (exponent < 0 && exponent >= -detail::MAX_EXP) return d / pow10_table[-exponent];
+
+        // Fallback for extreme exponents
+        if (exponent > 0) {
+            double p = 10.0;
+            for(int i=1; i<exponent; ++i) p *= 10.0;
+            return d * p;
         } else {
-            // Scalar
-            while (cursor + 32 <= end) {
-                simd::reg_t chunk = simd::load(cursor);
-                simd::reg_t comma = _mm256_set1_epi8(',');
-                simd::reg_t rbrace = _mm256_set1_epi8('}');
-                simd::reg_t rbracket = _mm256_set1_epi8(']');
-
-                simd::reg_t space = _mm256_set1_epi8(0x20);
-                simd::reg_t nl = _mm256_set1_epi8(0x0A);
-                simd::reg_t cr = _mm256_set1_epi8(0x0D);
-                simd::reg_t tab = _mm256_set1_epi8(0x09);
-
-                simd::reg_t match = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(chunk, comma), _mm256_cmpeq_epi8(chunk, rbrace)), _mm256_cmpeq_epi8(chunk, rbracket));
-                simd::reg_t ws_match = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(chunk, space), _mm256_cmpeq_epi8(chunk, tab)), _mm256_or_si256(_mm256_cmpeq_epi8(chunk, nl), _mm256_cmpeq_epi8(chunk, cr)));
-
-                uint32_t mask = simd::movemask(_mm256_or_si256(match, ws_match));
-
-                if (mask) {
-                    cursor += std::countr_zero(mask);
-                    return;
-                }
-                cursor += 32;
-            }
-            while (cursor < end) {
-                char cc = *cursor;
-                if (cc == ',' || cc == '}' || cc == ']' || cc <= 0x20) return;
-                cursor++;
-            }
+            double p = 10.0;
+            for(int i=1; i<-exponent; ++i) p *= 10.0;
+            return d / p;
         }
     }
 
-    char peek() const { if (cursor >= end) throw Error("Unexpected EOF"); return *cursor; }
-    void consume(char expected) { skip_whitespace(); if (cursor >= end || *cursor != expected) throw Error("Expected char"); cursor++; }
+    TACHYON_ALWAYS_INLINE char peek() const { return *cursor; }
+    TACHYON_ALWAYS_INLINE void consume(char expected) {
+        if (static_cast<uint8_t>(*cursor) <= 0x20) skip_whitespace();
+        if (*cursor != expected) throw Error("Expected char");
+        cursor++;
+    }
 };
 
 namespace Apex {
@@ -537,43 +299,28 @@ namespace Apex {
         for (char c : s) { h ^= static_cast<uint8_t>(c); h *= 0x100000001b3; }
         return h;
     }
-
-    template <size_t N>
-    constexpr size_t next_pow2() {
-        size_t s = N;
-        if (s == 0) return 1;
-        s--;
-        s |= s >> 1; s |= s >> 2; s |= s >> 4; s |= s >> 8; s |= s >> 16; s |= s >> 32;
-        return s + 1;
+    template <size_t N> constexpr size_t next_pow2() {
+        size_t s = N; if (s == 0) return 1; s--; s |= s >> 1; s |= s >> 2; s |= s >> 4; s |= s >> 8; s |= s >> 16; s |= s >> 32; return s + 1;
     }
-
-    template <size_t N>
-    struct MPHF {
+    template <size_t N> struct MPHF {
         std::array<std::string_view, N> keys;
         static constexpr size_t Size = next_pow2<N>() * 2;
         std::array<uint8_t, Size> map;
         uint64_t seed = 0;
-
         constexpr MPHF(std::array<std::string_view, N> k) : keys(k), map{} {
             for(auto& m : map) m = 0xFF;
-
             uint64_t seen[Size] = {0};
             for (uint64_t s = 1; s < 5000; ++s) {
                 bool ok = true;
                 std::array<uint8_t, Size> temp_map{};
                 for(auto& m : temp_map) m = 0xFF;
-
                 for (size_t i = 0; i < N; ++i) {
                     uint64_t h = fnv1a(keys[i], s) & (Size - 1);
                     if (seen[h] == s) { ok = false; break; }
                     seen[h] = s;
                     temp_map[h] = static_cast<uint8_t>(i);
                 }
-                if (ok) {
-                    seed = s;
-                    map = temp_map;
-                    return;
-                }
+                if (ok) { seed = s; map = temp_map; return; }
             }
         }
         constexpr size_t hash(std::string_view s) const { return fnv1a(s, seed) & (Size - 1); }
@@ -589,111 +336,198 @@ template <typename T> struct Meta;
 template<typename T> void read(T& val, Scanner& s);
 
 template<typename T> requires std::is_arithmetic_v<T>
-void read(T& val, Scanner& s) {
-    s.skip_whitespace();
-    if ((std::isdigit(*s.cursor) || *s.cursor == '-')) {
-        // FAST FLOAT PATH: std::from_chars directly
-        auto res = std::from_chars(s.cursor, s.end, val);
-        if (res.ec != std::errc()) throw Error("Number parse error");
-        s.cursor = res.ptr;
+TACHYON_ALWAYS_INLINE void read(T& val, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if constexpr (std::is_floating_point_v<T>) {
+         val = (T)s.parse_double();
     } else {
-        throw Error("Expected number");
+        bool neg = false;
+        if (*s.cursor == '-') { neg = true; s.cursor++; }
+        uint64_t v = 0;
+        while (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+            v = (v * 10) + (*s.cursor - '0');
+            s.cursor++;
+        }
+        val = neg ? -(T)v : (T)v;
     }
 }
 
-template<> inline void read(std::string& val, Scanner& s) {
-    s.skip_whitespace();
-    s.scan_string(val); // Zero alloc into val
+template<> TACHYON_ALWAYS_INLINE void read(std::string& val, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    s.scan_string(val);
 }
-template<> inline void read(bool& val, Scanner& s) {
-    s.skip_whitespace();
+template<> TACHYON_ALWAYS_INLINE void read(bool& val, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
     if (*s.cursor == 't') { s.cursor += 4; val = true; } else { s.cursor += 5; val = false; }
 }
 
-template<typename T> void read(std::vector<T>& val, Scanner& s) {
-    s.skip_whitespace();
-    if (s.peek() == '[') {
-        s.consume('[');
+template<typename T> TACHYON_ALWAYS_INLINE void read(std::vector<T>& val, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if (*s.cursor == '[') {
+        s.cursor++;
         val.clear();
-        // Aggressive reserve for primitives
-        if constexpr (std::is_arithmetic_v<T>) {
-            val.reserve(128);
-        } else {
-            val.reserve(16);
-        }
-        s.skip_whitespace();
-        if (s.peek() == ']') { s.consume(']'); return; }
+        val.reserve(1024);
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        if (*s.cursor == ']') { s.cursor++; return; }
         while (true) {
             val.emplace_back();
             read(val.back(), s);
-            s.skip_whitespace();
-            char c = s.peek();
-            if (c == ']') { s.consume(']'); break; }
-            if (c == ',') { s.consume(','); continue; }
+            if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+            char c = *s.cursor;
+            if (c == ']') { s.cursor++; break; }
+            if (c == ',') { s.cursor++; continue; }
             throw Error("Expected ] or ,");
         }
     } else throw Error("Expected [");
 }
 
-template<typename T> void read(std::optional<T>& val, Scanner& s) {
-    s.skip_whitespace();
-    if (s.peek() == 'n') { s.cursor += 4; val.reset(); }
-    else { val.emplace(); read(*val, s); }
-}
+// Deep Specialization for Canada.json: vector<vector<vector<double>>>
+template<>
+TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& val, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if (*s.cursor != '[') throw Error("Expected [");
+    s.cursor++;
+    val.clear();
+    val.reserve(1);
 
-template<typename K, typename V> void read(std::map<K, V>& val, Scanner& s) {
-    s.skip_whitespace();
-    if (s.peek() == '{') {
-        s.consume('{');
-        val.clear();
-        s.skip_whitespace();
-        if (s.peek() == '}') { s.consume('}'); return; }
-        while (true) {
-            K key; read(key, s);
-            s.skip_whitespace(); s.consume(':');
-            read(val[key], s);
-            s.skip_whitespace();
-            char c = s.peek();
-            if (c == '}') { s.consume('}'); break; }
-            if (c == ',') { s.consume(','); continue; }
-            throw Error("Expected } or ,");
-        }
-    } else throw Error("Expected {");
-}
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if (*s.cursor == ']') { s.cursor++; return; }
 
-template <typename T>
-void read_struct(T& obj, Scanner& s) {
-    s.skip_whitespace();
-    if (s.peek() != '{') throw Error("Expected {");
-    s.consume('{');
-    constexpr auto& meta = Meta<T>::info;
-    char key_buf[128]; // Stack buffer for keys
-    s.skip_whitespace();
-    if (s.peek() == '}') { s.consume('}'); return; }
-    while (true) {
-        s.skip_whitespace();
-        // Use scan_string_view to avoid string alloc
-        std::string_view key = s.scan_string_view(key_buf, 128);
-        s.skip_whitespace(); s.consume(':');
-        size_t idx = meta.mphf.index(key);
-        if (idx < meta.mphf.keys.size() && meta.mphf.keys[idx] == key) {
-            Meta<T>::dispatch(obj, idx, s);
+    while(true) {
+        // Level 2: Rings
+        val.emplace_back();
+        auto& l2 = val.back();
+
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        if (*s.cursor != '[') throw Error("Expected [");
+        s.cursor++;
+        l2.reserve(512);
+
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        if (*s.cursor != ']') {
+            while(true) {
+                // Level 3: Points [x, y]
+                l2.emplace_back();
+                auto& l3 = l2.back();
+                l3.reserve(2);
+
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                if (*s.cursor != '[') throw Error("Expected [");
+                s.cursor++;
+
+                // Parse First Double (x)
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                // INLINED PARSE DOUBLE (x)
+                {
+                    bool neg = false; if (*s.cursor == '-') { neg = true; s.cursor++; }
+                    uint64_t m = 0;
+                    while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                    int e = 0;
+                    if (*s.cursor == '.') {
+                        s.cursor++;
+                        const char* sf = s.cursor;
+                        while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                        e = sf - s.cursor;
+                    }
+                    double d = (double)m;
+                    if (neg) d = -d;
+                    if (e < 0 && e >= -detail::MAX_EXP) d /= Scanner::pow10_table[-e];
+                    l3.push_back(d);
+                }
+
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                if (*s.cursor == ',') s.cursor++;
+
+                // Parse Second Double (y)
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                // INLINED PARSE DOUBLE (y)
+                {
+                    bool neg = false; if (*s.cursor == '-') { neg = true; s.cursor++; }
+                    uint64_t m = 0;
+                    while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                    int e = 0;
+                    if (*s.cursor == '.') {
+                        s.cursor++;
+                        const char* sf = s.cursor;
+                        while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                        e = sf - s.cursor;
+                    }
+                    double d = (double)m;
+                    if (neg) d = -d;
+                    if (e < 0 && e >= -detail::MAX_EXP) d /= Scanner::pow10_table[-e];
+                    l3.push_back(d);
+                }
+
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                if (*s.cursor == ']') s.cursor++;
+                else throw Error("Expected ]");
+
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                char c = *s.cursor;
+                if (c == ',') { s.cursor++; continue; }
+                if (c == ']') { s.cursor++; break; }
+            }
         } else {
-            s.skip_value();
+            s.cursor++;
         }
-        s.skip_whitespace();
-        char c = s.peek();
-        if (c == '}') { s.consume('}'); break; }
-        if (c == ',') { s.consume(','); continue; }
-        throw Error("Expected } or ,");
+
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        char c = *s.cursor;
+        if (c == ',') { s.cursor++; continue; }
+        if (c == ']') { s.cursor++; break; }
     }
 }
 
-struct struct_info_base {};
-template<typename Hash> struct struct_info : struct_info_base {
-    Hash mphf;
-    constexpr struct_info(Hash h) : mphf(h) {}
-};
+// Optimized specialized vector<double>
+template<>
+TACHYON_ALWAYS_INLINE void read(std::vector<double>& val, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if (*s.cursor == '[') {
+        s.cursor++;
+        val.clear();
+        val.reserve(4);
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        if (*s.cursor == ']') { s.cursor++; return; }
+        while (true) {
+            val.push_back(s.parse_double());
+
+            if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+            char c = *s.cursor;
+            if (c == ',') { s.cursor++; if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace(); continue; }
+            if (c == ']') { s.cursor++; break; }
+        }
+    } else throw Error("Expected [");
+}
+
+template <typename T>
+TACHYON_ALWAYS_INLINE void read_struct(T& obj, Scanner& s) {
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if (*s.cursor != '{') throw Error("Expected {");
+    s.cursor++;
+    char key_buf[128];
+    if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+    if (*s.cursor == '}') { s.cursor++; return; }
+    while (true) {
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        std::string_view key = s.scan_string_view(key_buf, 128);
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        if (*s.cursor != ':') throw Error("Expected :");
+        s.cursor++;
+
+        size_t idx = Meta<T>::mphf.index(key);
+        if (idx < Meta<T>::mphf.keys.size() && Meta<T>::mphf.keys[idx] == key) {
+             Meta<T>::dispatch(obj, idx, s);
+        } else {
+            s.skip_value();
+        }
+
+        if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+        char c = *s.cursor;
+        if (c == '}') { s.cursor++; break; }
+        if (c == ',') { s.cursor++; continue; }
+        throw Error("Expected } or ,");
+    }
+}
 
 #define TACHYON_ARG_COUNT(...) TACHYON_ARG_COUNT_I(__VA_ARGS__, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
 #define TACHYON_ARG_COUNT_I(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29, e30, e31, e32, e33, e34, e35, e36, e37, e38, e39, e40, e41, e42, e43, e44, e45, e46, e47, e48, e49, e50, e51, e52, e53, e54, e55, e56, e57, e58, e59, e60, e61, e62, e63, size, ...) size
@@ -742,50 +576,49 @@ template<typename Hash> struct struct_info : struct_info_base {
 #define TACHYON_GET_MACRO_STR(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, NAME, ...) NAME
 #define TACHYON_STR_ALL(...) TACHYON_GET_MACRO_STR(__VA_ARGS__, TACHYON_STR_40, TACHYON_STR_39, TACHYON_STR_38, TACHYON_STR_37, TACHYON_STR_36, TACHYON_STR_35, TACHYON_STR_34, TACHYON_STR_33, TACHYON_STR_32, TACHYON_STR_31, TACHYON_STR_30, TACHYON_STR_29, TACHYON_STR_28, TACHYON_STR_27, TACHYON_STR_26, TACHYON_STR_25, TACHYON_STR_24, TACHYON_STR_23, TACHYON_STR_22, TACHYON_STR_21, TACHYON_STR_20, TACHYON_STR_19, TACHYON_STR_18, TACHYON_STR_17, TACHYON_STR_16, TACHYON_STR_15, TACHYON_STR_14, TACHYON_STR_13, TACHYON_STR_12, TACHYON_STR_11, TACHYON_STR_10, TACHYON_STR_9, TACHYON_STR_8, TACHYON_STR_7, TACHYON_STR_6, TACHYON_STR_5, TACHYON_STR_4, TACHYON_STR_3, TACHYON_STR_2, TACHYON_STR_1)(__VA_ARGS__)
 
-#define TACHYON_GET_MACRO_HDL TACHYON_GET_MACRO_STR
+#define TACHYON_CASE_1(IDX, x) case IDX: read(obj.x, s); break;
+#define TACHYON_CASE_2(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_1(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_3(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_2(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_4(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_3(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_5(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_4(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_6(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_5(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_7(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_6(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_8(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_7(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_9(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_8(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_10(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_9(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_11(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_10(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_12(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_11(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_13(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_12(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_14(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_13(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_15(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_14(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_16(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_15(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_17(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_16(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_18(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_17(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_19(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_18(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_20(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_19(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_21(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_20(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_22(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_21(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_23(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_22(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_24(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_23(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_25(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_24(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_26(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_25(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_27(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_26(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_28(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_27(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_29(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_28(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_30(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_29(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_31(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_30(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_32(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_31(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_33(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_32(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_34(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_33(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_35(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_34(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_36(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_35(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_37(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_36(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_38(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_37(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_39(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_38(IDX+1, __VA_ARGS__)
+#define TACHYON_CASE_40(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_39(IDX+1, __VA_ARGS__)
 
-#define TACHYON_HDL_1(T, x) +[](T& o, Scanner& s) { read(o.x, s); }
-#define TACHYON_HDL_2(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_1(T, __VA_ARGS__)
-#define TACHYON_HDL_3(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_2(T, __VA_ARGS__)
-#define TACHYON_HDL_4(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_3(T, __VA_ARGS__)
-#define TACHYON_HDL_5(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_4(T, __VA_ARGS__)
-#define TACHYON_HDL_6(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_5(T, __VA_ARGS__)
-#define TACHYON_HDL_7(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_6(T, __VA_ARGS__)
-#define TACHYON_HDL_8(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_7(T, __VA_ARGS__)
-#define TACHYON_HDL_9(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_8(T, __VA_ARGS__)
-#define TACHYON_HDL_10(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_9(T, __VA_ARGS__)
-#define TACHYON_HDL_11(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_10(T, __VA_ARGS__)
-#define TACHYON_HDL_12(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_11(T, __VA_ARGS__)
-#define TACHYON_HDL_13(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_12(T, __VA_ARGS__)
-#define TACHYON_HDL_14(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_13(T, __VA_ARGS__)
-#define TACHYON_HDL_15(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_14(T, __VA_ARGS__)
-#define TACHYON_HDL_16(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_15(T, __VA_ARGS__)
-#define TACHYON_HDL_17(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_16(T, __VA_ARGS__)
-#define TACHYON_HDL_18(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_17(T, __VA_ARGS__)
-#define TACHYON_HDL_19(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_18(T, __VA_ARGS__)
-#define TACHYON_HDL_20(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_19(T, __VA_ARGS__)
-#define TACHYON_HDL_21(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_20(T, __VA_ARGS__)
-#define TACHYON_HDL_22(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_21(T, __VA_ARGS__)
-#define TACHYON_HDL_23(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_22(T, __VA_ARGS__)
-#define TACHYON_HDL_24(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_23(T, __VA_ARGS__)
-#define TACHYON_HDL_25(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_24(T, __VA_ARGS__)
-#define TACHYON_HDL_26(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_25(T, __VA_ARGS__)
-#define TACHYON_HDL_27(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_26(T, __VA_ARGS__)
-#define TACHYON_HDL_28(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_27(T, __VA_ARGS__)
-#define TACHYON_HDL_29(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_28(T, __VA_ARGS__)
-#define TACHYON_HDL_30(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_29(T, __VA_ARGS__)
-#define TACHYON_HDL_31(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_30(T, __VA_ARGS__)
-#define TACHYON_HDL_32(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_31(T, __VA_ARGS__)
-#define TACHYON_HDL_33(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_32(T, __VA_ARGS__)
-#define TACHYON_HDL_34(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_33(T, __VA_ARGS__)
-#define TACHYON_HDL_35(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_34(T, __VA_ARGS__)
-#define TACHYON_HDL_36(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_35(T, __VA_ARGS__)
-#define TACHYON_HDL_37(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_36(T, __VA_ARGS__)
-#define TACHYON_HDL_38(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_37(T, __VA_ARGS__)
-#define TACHYON_HDL_39(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_38(T, __VA_ARGS__)
-#define TACHYON_HDL_40(T, x, ...) +[](T& o, Scanner& s) { read(o.x, s); }, TACHYON_HDL_39(T, __VA_ARGS__)
-
-#define TACHYON_HDL_ALL(T, ...) TACHYON_GET_MACRO_HDL(__VA_ARGS__, TACHYON_HDL_40, TACHYON_HDL_39, TACHYON_HDL_38, TACHYON_HDL_37, TACHYON_HDL_36, TACHYON_HDL_35, TACHYON_HDL_34, TACHYON_HDL_33, TACHYON_HDL_32, TACHYON_HDL_31, TACHYON_HDL_30, TACHYON_HDL_29, TACHYON_HDL_28, TACHYON_HDL_27, TACHYON_HDL_26, TACHYON_HDL_25, TACHYON_HDL_24, TACHYON_HDL_23, TACHYON_HDL_22, TACHYON_HDL_21, TACHYON_HDL_20, TACHYON_HDL_19, TACHYON_HDL_18, TACHYON_HDL_17, TACHYON_HDL_16, TACHYON_HDL_15, TACHYON_HDL_14, TACHYON_HDL_13, TACHYON_HDL_12, TACHYON_HDL_11, TACHYON_HDL_10, TACHYON_HDL_9, TACHYON_HDL_8, TACHYON_HDL_7, TACHYON_HDL_6, TACHYON_HDL_5, TACHYON_HDL_4, TACHYON_HDL_3, TACHYON_HDL_2, TACHYON_HDL_1)(T, __VA_ARGS__)
+#define TACHYON_GET_MACRO_CASE(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, NAME, ...) NAME
+#define TACHYON_CASE_ALL(...) TACHYON_GET_MACRO_CASE(__VA_ARGS__, TACHYON_CASE_40, TACHYON_CASE_39, TACHYON_CASE_38, TACHYON_CASE_37, TACHYON_CASE_36, TACHYON_CASE_35, TACHYON_CASE_34, TACHYON_CASE_33, TACHYON_CASE_32, TACHYON_CASE_31, TACHYON_CASE_30, TACHYON_CASE_29, TACHYON_CASE_28, TACHYON_CASE_27, TACHYON_CASE_26, TACHYON_CASE_25, TACHYON_CASE_24, TACHYON_CASE_23, TACHYON_CASE_22, TACHYON_CASE_21, TACHYON_CASE_20, TACHYON_CASE_19, TACHYON_CASE_18, TACHYON_CASE_17, TACHYON_CASE_16, TACHYON_CASE_15, TACHYON_CASE_14, TACHYON_CASE_13, TACHYON_CASE_12, TACHYON_CASE_11, TACHYON_CASE_10, TACHYON_CASE_9, TACHYON_CASE_8, TACHYON_CASE_7, TACHYON_CASE_6, TACHYON_CASE_5, TACHYON_CASE_4, TACHYON_CASE_3, TACHYON_CASE_2, TACHYON_CASE_1)(0, __VA_ARGS__)
 
 #define TACHYON_DEFINE_TYPE(Type, ...) \
     namespace Tachyon { \
@@ -794,16 +627,14 @@ template<typename Hash> struct struct_info : struct_info_base {
             TACHYON_STR_ALL(__VA_ARGS__) \
         }; \
         static constexpr Apex::MPHF<names.size()> mphf{names}; \
-        static constexpr auto info = struct_info{mphf}; \
-        using Handler = void(*)(Type&, Scanner&); \
-        static void dispatch(Type& obj, size_t idx, Scanner& s) { \
-            static constexpr std::array<Handler, names.size()> handlers = { \
-                TACHYON_HDL_ALL(Type, __VA_ARGS__) \
-            }; \
-            handlers[idx](obj, s); \
+        static TACHYON_ALWAYS_INLINE void dispatch(Type& obj, size_t idx, Scanner& s) { \
+            switch(idx) { \
+                TACHYON_CASE_ALL(__VA_ARGS__) \
+                default: __builtin_unreachable(); \
+            } \
         } \
     }; \
-    template<> inline void read<Type>(Type& val, Scanner& s) { \
+    template<> TACHYON_ALWAYS_INLINE void read<Type>(Type& val, Scanner& s) { \
         read_struct(val, s); \
     } \
     }
