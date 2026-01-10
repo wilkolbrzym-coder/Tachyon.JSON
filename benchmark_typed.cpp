@@ -33,7 +33,7 @@ namespace Tachyon {
         if (s.peek() == '}') { s.consume('}'); return; }
         while (true) {
             s.skip_whitespace();
-            std::string_view key = s.scan_string(key_buf, 128);
+            std::string_view key = s.scan_string_view(key_buf, 128);
             s.skip_whitespace(); s.consume(':');
             if (key == "urls") {
                 read(val.urls, s);

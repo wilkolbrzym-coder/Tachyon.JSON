@@ -19,10 +19,10 @@ void test_utf8_escapes() {
     {
         std::string json = R"("Hello\nWorld")";
         Tachyon::Scanner s(json);
-        char buf[1024];
-        auto res = s.scan_string(buf, 1024);
-        if (res != "Hello\nWorld") {
-            std::cerr << "FAIL: Basic Escape. Got: " << res << std::endl;
+        std::string buf;
+        s.scan_string(buf);
+        if (buf != "Hello\nWorld") {
+            std::cerr << "FAIL: Basic Escape. Got: " << buf << std::endl;
             exit(1);
         }
     }
@@ -31,13 +31,13 @@ void test_utf8_escapes() {
     {
         std::string json = R"("\u00A9 2026")"; // Copyright symbol
         Tachyon::Scanner s(json);
-        char buf[1024];
-        auto res = s.scan_string(buf, 1024);
+        std::string buf;
+        s.scan_string(buf);
         // UTF-8 for U+00A9 is C2 A9
         std::string expected = "\xC2\xA9 2026";
-        if (res != expected) {
-            std::cerr << "FAIL: BMP Escape. Got size " << res.size() << std::endl;
-             for(char c : res) std::cerr << std::hex << (int)(unsigned char)c << " ";
+        if (buf != expected) {
+            std::cerr << "FAIL: BMP Escape. Got size " << buf.size() << std::endl;
+             for(char c : buf) std::cerr << std::hex << (int)(unsigned char)c << " ";
              std::cerr << std::endl;
             exit(1);
         }
@@ -48,13 +48,13 @@ void test_utf8_escapes() {
         // U+1F600 (Grinning Face) = \uD83D\uDE00
         std::string json = R"("\uD83D\uDE00")";
         Tachyon::Scanner s(json);
-        char buf[1024];
-        auto res = s.scan_string(buf, 1024);
+        std::string buf;
+        s.scan_string(buf);
         // UTF-8 for U+1F600 is F0 9F 98 80
         std::string expected = "\xF0\x9F\x98\x80";
-        if (res != expected) {
-            std::cerr << "FAIL: Surrogate Pair. Got size " << res.size() << std::endl;
-            for(char c : res) std::cerr << std::hex << (int)(unsigned char)c << " ";
+        if (buf != expected) {
+            std::cerr << "FAIL: Surrogate Pair. Got size " << buf.size() << std::endl;
+            for(char c : buf) std::cerr << std::hex << (int)(unsigned char)c << " ";
             std::cerr << std::endl;
             exit(1);
         }
@@ -73,9 +73,9 @@ void test_boundaries() {
         std::string j = p + R"("TestString")";
         Tachyon::Scanner s(j);
         s.skip_whitespace();
-        char buf[1024];
-        auto res = s.scan_string(buf, 1024);
-        if (res != "TestString") {
+        std::string buf;
+        s.scan_string(buf);
+        if (buf != "TestString") {
              std::cerr << "FAIL: Boundary offset " << i << std::endl;
              exit(1);
         }
@@ -89,8 +89,8 @@ void test_malformed() {
     auto check_fail = [](std::string j) {
         try {
             Tachyon::Scanner s(j);
-            char buf[1024];
-            s.scan_string(buf, 1024);
+            std::string buf;
+            s.scan_string(buf);
             std::cerr << "FAIL: Should have thrown on: " << j << std::endl;
             exit(1);
         } catch (const Tachyon::Error&) {
