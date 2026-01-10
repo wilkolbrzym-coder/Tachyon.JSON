@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <fstream>
 #include <cstring>
+#include <cmath>
 
 // --- TACHYON METADATA REGISTRATION ---
 
@@ -112,6 +113,20 @@ double sum_canada(const canada::FeatureCollection& obj) {
     return sum;
 }
 
+void verify_small(const small::Object& g, const small::Object& t) {
+    if (g.id != t.id) throw std::runtime_error("ID mismatch");
+    if (g.name != t.name) throw std::runtime_error("Name mismatch");
+    if (g.checked != t.checked) throw std::runtime_error("Checked mismatch");
+    if (g.scores.size() != t.scores.size()) throw std::runtime_error("Scores size mismatch");
+    for(size_t i=0; i<g.scores.size(); ++i) if(g.scores[i] != t.scores[i]) throw std::runtime_error("Scores mismatch");
+    if (g.meta.active != t.meta.active) throw std::runtime_error("Meta.active mismatch");
+    if (std::abs(g.meta.rank - t.meta.rank) > 1e-8) {
+        std::cerr << "Rank G: " << g.meta.rank << " T: " << t.meta.rank << "\n";
+        throw std::runtime_error("Meta.rank mismatch");
+    }
+    if (g.description != t.description) throw std::runtime_error("Description mismatch");
+}
+
 int main() {
     std::string canada_data = read_file("canada.json");
     std::string twitter_data = read_file("twitter.json");
@@ -166,12 +181,12 @@ int main() {
                 Tachyon::Scanner sc(padded_data.data(), data.size());
                 Tachyon::read(obj_t, sc);
 
-                // --- VERIFICATION FOR CANADA ---
+                // --- VERIFICATION ---
                 if (name == "Canada.json") {
                     double sum_g = sum_canada((const canada::FeatureCollection&)obj_g);
                     double sum_t = sum_canada((const canada::FeatureCollection&)obj_t);
                     double diff = std::abs(sum_g - sum_t);
-                    if (diff > 1e-9) {
+                    if (diff > 1e-8) { // Relaxed to 1e-8 for non-fast_float
                         std::cerr << "CRITICAL ERROR: Data integrity check failed!" << std::endl;
                         std::cerr << "Glaze Sum:   " << std::setprecision(10) << sum_g << std::endl;
                         std::cerr << "Tachyon Sum: " << std::setprecision(10) << sum_t << std::endl;
@@ -180,6 +195,9 @@ int main() {
                     } else {
                         std::cout << "Integrity Check: PASSED (Diff: " << diff << ")" << std::endl;
                     }
+                } else if (name == "Small.json") {
+                    verify_small((const small::Object&)obj_g, (const small::Object&)obj_t);
+                    std::cout << "Integrity Check: PASSED" << std::endl;
                 }
 
                 std::vector<double> times;

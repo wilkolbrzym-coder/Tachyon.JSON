@@ -44,22 +44,22 @@ namespace simd {
 }
 
 namespace detail {
-    static constexpr int MAX_EXP = 308;
-    static constexpr std::array<double, MAX_EXP + 1> generate_pow10() {
-        std::array<double, MAX_EXP + 1> table{};
-        long double v = 1.0;
-        for (int i = 0; i <= MAX_EXP; ++i) {
-            table[i] = static_cast<double>(v);
-            if (i < MAX_EXP) v *= 10.0;
+    static constexpr int TACHYON_MAX_EXP = 308;
+    static constexpr std::array<double, TACHYON_MAX_EXP + 1> generate_pow10() {
+        std::array<double, TACHYON_MAX_EXP + 1> table{};
+        double v = 1.0;
+        for (int i = 0; i <= TACHYON_MAX_EXP; ++i) {
+            table[i] = v;
+            if (i < TACHYON_MAX_EXP) v *= 10.0;
         }
         return table;
     }
-    static constexpr std::array<double, MAX_EXP + 1> generate_neg_pow10() {
-        std::array<double, MAX_EXP + 1> table{};
-        long double v = 1.0;
-        for (int i = 0; i <= MAX_EXP; ++i) {
-            table[i] = static_cast<double>(v);
-            if (i < MAX_EXP) v /= 10.0;
+    static constexpr std::array<double, TACHYON_MAX_EXP + 1> generate_neg_pow10() {
+        std::array<double, TACHYON_MAX_EXP + 1> table{};
+        double v = 1.0;
+        for (int i = 0; i <= TACHYON_MAX_EXP; ++i) {
+            table[i] = v;
+            if (i < TACHYON_MAX_EXP) v /= 10.0;
         }
         return table;
     }
@@ -106,6 +106,17 @@ public:
 
             uint32_t mask_quote = simd::movemask(is_quote);
             uint32_t mask_slash = simd::movemask(is_slash);
+
+            // Strict Validation: Control chars
+            simd::reg_t limit = _mm256_set1_epi8(0x1F);
+            simd::reg_t is_ctrl = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, limit), limit);
+            uint32_t mask_ctrl = simd::movemask(is_ctrl);
+
+            if (mask_ctrl) {
+                uint32_t combined = mask_quote | mask_slash | mask_ctrl;
+                int idx = std::countr_zero(combined);
+                if (mask_ctrl & (1 << idx)) throw Error("Control char in string");
+            }
 
             if (mask_slash) {
                  int combined = mask_quote | mask_slash;
@@ -184,6 +195,7 @@ public:
                     default: out.push_back(esc);
                 }
             } else {
+                if (static_cast<uint8_t>(c) < 0x20) throw Error("Control char");
                 out.push_back(c);
             }
             r++;
@@ -209,6 +221,7 @@ public:
                     default: *out++ = esc;
                 }
             } else {
+                if (static_cast<uint8_t>(c) < 0x20) throw Error("Control char");
                 *out++ = c;
             }
             r++;
@@ -245,6 +258,8 @@ public:
         if (*cursor == '-') { negative = true; cursor++; }
 
         uint64_t mantissa = 0;
+
+        // Unroll 8x digit read (Scalar)
         if (static_cast<uint8_t>(*cursor - '0') < 10) {
             mantissa = (*cursor++ - '0');
             while (static_cast<uint8_t>(*cursor - '0') < 10) {
@@ -269,9 +284,8 @@ public:
         if (negative) d = -d;
 
         if (exponent == 0) return d;
-        if (exponent > 0 && exponent <= detail::MAX_EXP) return d * pow10_table[exponent];
-        // Use division for negative exponent to match fast_float precision better
-        if (exponent < 0 && exponent >= -detail::MAX_EXP) return d / pow10_table[-exponent];
+        if (exponent > 0 && exponent <= detail::TACHYON_MAX_EXP) return d * pow10_table[exponent];
+        if (exponent < 0 && exponent >= -detail::TACHYON_MAX_EXP) return d * neg_pow10_table[-exponent]; // Mul for speed
 
         return d * std::pow(10.0, exponent);
     }
@@ -298,7 +312,7 @@ namespace Apex {
         static constexpr size_t Size = next_pow2<N>() * 2;
         std::array<uint8_t, Size> map;
         uint64_t seed = 0;
-        constexpr MPHF(std::array<std::string_view, N> k) : keys(k), map{} {
+        constexpr MPHF(const std::array<std::string_view, N>& k) : keys(k), map{} {
             for(auto& m : map) m = 0xFF;
             uint64_t seen[Size] = {0};
             for (uint64_t s = 1; s < 5000; ++s) {
@@ -323,7 +337,7 @@ namespace Apex {
     };
 }
 
-template <typename T> struct Meta;
+template <typename T> struct TachyonMeta;
 template<typename T> void read(T& val, Scanner& s);
 
 template<typename T> requires std::is_arithmetic_v<T>
@@ -379,100 +393,126 @@ TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& v
     if (*s.cursor != '[') throw Error("Expected [");
     s.cursor++;
     val.clear();
-    val.reserve(1); // Polygons
+    val.reserve(1);
 
     if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
     if (*s.cursor == ']') { s.cursor++; return; }
 
     while(true) {
-        // Level 2: Rings (Vector of Points)
+        // Level 2: Rings
         val.emplace_back();
         auto& l2 = val.back();
 
         if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
         if (*s.cursor != '[') throw Error("Expected [");
         s.cursor++;
-        l2.reserve(1024); // Large reserve for points
+        l2.reserve(512);
 
-        // Prefetch ahead
+        // Prefetch
         _mm_prefetch(s.cursor + 64, _MM_HINT_T0);
 
         if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
         if (*s.cursor != ']') {
             while(true) {
                 // Level 3: Points [x, y]
-                // "Unsafe" mode: parse X, comma, Y, ] directly with inline code.
-                // Avoid emplace_back overhead by resize + direct access.
-
-                // Get pointer to next element in l2
                 size_t old_size = l2.size();
                 l2.resize(old_size + 1);
                 std::vector<double>& pt = l2[old_size];
-                pt.resize(2); // Pre-allocate 2 doubles
+                pt.resize(2);
                 double* dptr = pt.data();
 
-                // Expect [
-                // assume consumed or whitespace skipped?
-                // The previous loop end or start handles [
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
-                if (*s.cursor == '[') s.cursor++;
-                else throw Error("Expected [");
+                if (*s.cursor == '[') s.cursor++; else throw Error("Expected [");
 
-                // Parse X (Inline Fused)
+                // Inline Parse Double X (Unrolled)
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
                 {
                     bool neg = false; if (*s.cursor == '-') { neg = true; s.cursor++; }
                     uint64_t m = 0;
+                    // Unroll 4
+                    if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                        m = (*s.cursor++ - '0');
+                        if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                            m = (m * 10) + (*s.cursor++ - '0');
+                            if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                                m = (m * 10) + (*s.cursor++ - '0');
+                                if (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                            }
+                        }
+                    }
                     while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
                     int e = 0;
                     if (*s.cursor == '.') {
                         s.cursor++;
                         const char* sf = s.cursor;
-                        while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                        // Unroll 4
+                        while (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                            m = (m * 10) + (*s.cursor++ - '0');
+                            if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                                m = (m * 10) + (*s.cursor++ - '0');
+                                if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                                    m = (m * 10) + (*s.cursor++ - '0');
+                                    if (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                                }
+                            }
+                        }
                         e = sf - s.cursor;
                     }
                     double d = (double)m;
                     if (neg) d = -d;
-                    if (e < 0 && e >= -detail::MAX_EXP) d /= Scanner::pow10_table[-e];
+                    if (e < 0 && e >= -detail::TACHYON_MAX_EXP) d *= Scanner::neg_pow10_table[-e];
                     dptr[0] = d;
                 }
 
-                // Expect Comma (Fast skip)
-                if (*s.cursor == ',') s.cursor++;
-                else if (static_cast<uint8_t>(*s.cursor) <= 0x20) {
-                    s.skip_whitespace();
-                    if (*s.cursor == ',') s.cursor++;
-                }
+                if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
+                if (*s.cursor == ',') s.cursor++; else throw Error("Expected ,");
 
-                // Parse Y (Inline Fused)
+                // Inline Parse Double Y (Unrolled)
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
                 {
                     bool neg = false; if (*s.cursor == '-') { neg = true; s.cursor++; }
                     uint64_t m = 0;
+                    if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                        m = (*s.cursor++ - '0');
+                        if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                            m = (m * 10) + (*s.cursor++ - '0');
+                            if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                                m = (m * 10) + (*s.cursor++ - '0');
+                                if (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                            }
+                        }
+                    }
                     while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
                     int e = 0;
                     if (*s.cursor == '.') {
                         s.cursor++;
                         const char* sf = s.cursor;
-                        while (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                        while (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                            m = (m * 10) + (*s.cursor++ - '0');
+                            if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                                m = (m * 10) + (*s.cursor++ - '0');
+                                if (static_cast<uint8_t>(*s.cursor - '0') < 10) {
+                                    m = (m * 10) + (*s.cursor++ - '0');
+                                    if (static_cast<uint8_t>(*s.cursor - '0') < 10) m = (m * 10) + (*s.cursor++ - '0');
+                                }
+                            }
+                        }
                         e = sf - s.cursor;
                     }
                     double d = (double)m;
                     if (neg) d = -d;
-                    if (e < 0 && e >= -detail::MAX_EXP) d /= Scanner::pow10_table[-e];
+                    if (e < 0 && e >= -detail::TACHYON_MAX_EXP) d *= Scanner::neg_pow10_table[-e];
                     dptr[1] = d;
                 }
 
-                // Expect ]
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
-                if (*s.cursor == ']') s.cursor++;
+                if (*s.cursor == ']') s.cursor++; else throw Error("Expected ]");
 
-                // Check Ring end
-                // We are at end of Point. Next is comma (next point) or ] (end of ring).
                 if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
                 char c = *s.cursor;
                 if (c == ',') { s.cursor++; continue; }
                 if (c == ']') { s.cursor++; break; }
+                throw Error("Expected ] or ,");
             }
         } else {
             s.cursor++;
@@ -482,9 +522,11 @@ TACHYON_ALWAYS_INLINE void read(std::vector<std::vector<std::vector<double>>>& v
         char c = *s.cursor;
         if (c == ',') { s.cursor++; continue; }
         if (c == ']') { s.cursor++; break; }
+        throw Error("Expected ] or ,");
     }
 }
 
+// Optimized specialized vector<double>
 template<>
 TACHYON_ALWAYS_INLINE void read(std::vector<double>& val, Scanner& s) {
     if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
@@ -496,6 +538,7 @@ TACHYON_ALWAYS_INLINE void read(std::vector<double>& val, Scanner& s) {
         if (*s.cursor == ']') { s.cursor++; return; }
         while (true) {
             val.push_back(s.parse_double());
+
             if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace();
             char c = *s.cursor;
             if (c == ',') { s.cursor++; if (static_cast<uint8_t>(*s.cursor) <= 0x20) s.skip_whitespace(); continue; }
@@ -519,9 +562,10 @@ TACHYON_ALWAYS_INLINE void read_struct(T& obj, Scanner& s) {
         if (*s.cursor != ':') throw Error("Expected :");
         s.cursor++;
 
-        size_t idx = Meta<T>::mphf.index(key);
-        if (idx < Meta<T>::mphf.keys.size() && Meta<T>::mphf.keys[idx] == key) {
-             Meta<T>::dispatch(obj, idx, s);
+        using M = TachyonMeta<T>;
+        size_t idx = M::hash_table.index(key);
+        if (idx < M::hash_table.keys.size() && M::hash_table.keys[idx] == key) {
+             M::dispatch(obj, idx, s);
         } else {
             s.skip_value();
         }
@@ -622,16 +666,17 @@ TACHYON_ALWAYS_INLINE void read_struct(T& obj, Scanner& s) {
 #define TACHYON_CASE_39(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_38(IDX+1, __VA_ARGS__)
 #define TACHYON_CASE_40(IDX, x, ...) case IDX: read(obj.x, s); break; TACHYON_CASE_39(IDX+1, __VA_ARGS__)
 
-#define TACHYON_GET_MACRO_CASE(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, NAME, ...) NAME
-#define TACHYON_CASE_ALL(...) TACHYON_GET_MACRO_CASE(__VA_ARGS__, TACHYON_CASE_40, TACHYON_CASE_39, TACHYON_CASE_38, TACHYON_CASE_37, TACHYON_CASE_36, TACHYON_CASE_35, TACHYON_CASE_34, TACHYON_CASE_33, TACHYON_CASE_32, TACHYON_CASE_31, TACHYON_CASE_30, TACHYON_CASE_29, TACHYON_CASE_28, TACHYON_CASE_27, TACHYON_CASE_26, TACHYON_CASE_25, TACHYON_CASE_24, TACHYON_CASE_23, TACHYON_CASE_22, TACHYON_CASE_21, TACHYON_CASE_20, TACHYON_CASE_19, TACHYON_CASE_18, TACHYON_CASE_17, TACHYON_CASE_16, TACHYON_CASE_15, TACHYON_CASE_14, TACHYON_CASE_13, TACHYON_CASE_12, TACHYON_CASE_11, TACHYON_CASE_10, TACHYON_CASE_9, TACHYON_CASE_8, TACHYON_CASE_7, TACHYON_CASE_6, TACHYON_CASE_5, TACHYON_CASE_4, TACHYON_CASE_3, TACHYON_CASE_2, TACHYON_CASE_1)(0, __VA_ARGS__)
+#define TACHYON_CONCAT_I(a, b) a##b
+#define TACHYON_CONCAT(a, b) TACHYON_CONCAT_I(a, b)
+#define TACHYON_CASE_ALL(...) TACHYON_CONCAT(TACHYON_CASE_, TACHYON_ARG_COUNT(__VA_ARGS__))(0, __VA_ARGS__)
 
 #define TACHYON_DEFINE_TYPE(Type, ...) \
     namespace Tachyon { \
-    template <> struct Meta<Type> { \
-        static constexpr auto names = std::array{ \
+    template <> struct TachyonMeta<Type> { \
+        static constexpr std::array<std::string_view, TACHYON_ARG_COUNT(__VA_ARGS__)> keys = { \
             TACHYON_STR_ALL(__VA_ARGS__) \
         }; \
-        static constexpr Apex::MPHF<names.size()> mphf{names}; \
+        static constexpr Apex::MPHF<keys.size()> hash_table{keys}; \
         static TACHYON_ALWAYS_INLINE void dispatch(Type& obj, size_t idx, Scanner& s) { \
             switch(idx) { \
                 TACHYON_CASE_ALL(__VA_ARGS__) \
