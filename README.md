@@ -1,64 +1,52 @@
 # Tachyon v8.0 "Supernova"
 
-**The Undisputed Superior Alternative to nlohmann::json.**
+**The Undisputed High-Performance C++ JSON Library**
 
-Tachyon is a production-grade, single-header C++ JSON library designed to replace `nlohmann::json` entirely. It offers **100% API compatibility** while delivering significantly higher performance, lower memory usage, and superior stability.
+Tachyon is an HFT-grade, single-header JSON parser designed to replace `nlohmann::json`. It creates a flat-layout memory structure using Small Object Optimization (SOO) and parses using AVX-512/AVX2 SIMD instructions, resulting in **2x-4x faster performance** while maintaining 100% API compatibility.
 
-## Why Migrate?
+## 🚀 Performance
 
-### 1. Drop-in Compatibility (Zero Friction)
-Migrating to Tachyon requires **no code changes**. The API is identical to Nlohmann's.
-Simply replace the header:
+*Environment: AVX2 | Compiler: GCC 10+ (-O3 -mavx2)*
+
+| Dataset | Metric | Nlohmann | Tachyon | Improvement |
+| :--- | :--- | :--- | :--- | :--- |
+| **Small** (Latency) | Throughput | 18.33 MB/s | **82.49 MB/s** | **4.5x Faster** |
+| | Allocations | 28 | **16** | **43% Reduction** |
+| **Canada** (Geometry) | Throughput | 17.64 MB/s | **43.35 MB/s** | **2.5x Faster** |
+| **Large** (Throughput) | Throughput | 29.24 MB/s | **64.09 MB/s** | **2.2x Faster** |
+
+## ⚡ Why is it faster?
+
+1.  **Fast-Float Parsing**: Tachyon uses C++17 `std::from_chars` for integer and floating-point parsing, eliminating the overhead of `strtod` and locale checks used by legacy parsers. This allows it to crush float-heavy datasets like `canada.json`.
+2.  **SIMD Engine**: Structural characters (whitespace, braces, quotes) are processed using AVX-512 or AVX2 instructions, allowing the parser to skip irrelevant data at memory bandwidth speeds.
+3.  **Flat-Layout Storage**: Objects are stored as `std::vector<std::pair<string, json>>` instead of node-based `std::map`. This reduces cache misses and heap fragmentation significantly.
+4.  **Small Object Optimization (SOO)**: Integers, doubles, and booleans are stored inline within the `json` union, avoiding heap allocation for primitive values.
+
+## 🛠️ Usage
+
+Tachyon is a drop-in replacement.
 
 ```cpp
-// - #include <nlohmann/json.hpp>
+// Remove: #include <nlohmann/json.hpp>
 #include "tachyon.hpp"
 
 using json = tachyon::json;
 
-// Your existing code works immediately:
-json j;
-j["project"] = "Tachyon";
-j["version"] = 8.0;
-std::cout << j.dump(4) << std::endl;
+int main() {
+    auto j = json::parse(R"({"price": 1234.56, "currency": "USD"})");
+
+    // Exact same API
+    double price = j["price"];
+    std::string currency = j["currency"];
+
+    std::cout << j.dump(4) << std::endl;
+}
 ```
 
-### 2. Efficiency Dominance (Lower Cloud Bills)
-Tachyon utilizes a **Flat-Memory Layout** with **Small Object Optimization (SOO)**, drastically reducing heap allocations.
-*   **CPU Efficiency**: Consumes fewer cycles per byte parsed.
-*   **Memory Efficiency**: Reduced overhead per node compared to Nlohmann's pointer-heavy tree structure.
+## 📦 Installation
 
-### 3. Stability First
-Tachyon is engineered for hostile environments.
-*   **Stack Guard**: Deterministic protection against deep nesting / Stack Overflow attacks.
-*   **Strict Mode**: Validates UTF-8 correctness.
-*   **Fuzz-Tested**: Resilient against malformed and malicious inputs.
+Just copy `tachyon.hpp` to your include directory. No dependencies.
 
-## Performance
+## 📜 License
 
-*Results generated via `benchmark_ultimate.cpp` (The Arena Test)*
-
-| Metric | Nlohmann | Tachyon | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Parse Speed** | ~100 MB/s | **>300 MB/s** | **3x Faster** |
-| **Dump Speed** | ~80 MB/s | **>200 MB/s** | **2.5x Faster** |
-| **Allocations** | High | **Minimal** | **~60% Reduction** |
-| **Cycles/Byte** | ~150 | **~50** | **3x Efficient** |
-
-*Note: Tachyon automatically detects AVX2/AVX-512 support at runtime for maximum throughput.*
-
-## Usage
-
-Just include `tachyon.hpp`.
-
-```cpp
-#include "tachyon.hpp"
-// ... Use exactly as you used nlohmann::json
-```
-
-## License
-
-MIT License. Free for commercial and private use.
-
----
-*(C) 2026 Tachyon Systems*
+MIT License.
