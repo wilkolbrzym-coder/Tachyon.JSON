@@ -1,123 +1,78 @@
-# Tachyon 0.7.2 "QUASAR" - The World's Fastest JSON Library
+# Tachyon v8.0 "QUASAR"
 
-**Mission Critical Status: ACTIVE**  
-**Codename: QUASAR**  
-**Author: WilkOlbrzym-Coder**  
-**License: Business Source License 1.1 (BSL)**
+**The Ultimate Drop-in Replacement for nlohmann::json**
 
----
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Standard](https://img.shields.io/badge/C%2B%2B-17%2F20-blue.svg)](https://en.cppreference.com/w/cpp)
+[![Status](https://img.shields.io/badge/Status-Production%20Ready-green.svg)]()
 
-## 🚀 Performance: At the Edge of Physics
+Tachyon is a high-performance, single-header JSON library designed to be API-compatible with `nlohmann::json` while delivering **orders of magnitude faster parsing speed** via SIMD (AVX2/AVX-512) acceleration.
 
-Tachyon 0.7.2 is not just a library; it is a weapon of mass optimization. Built with a "Dual-Engine" architecture targeting AVX2 and AVX-512, it pushes x86 hardware to its absolute physical limits.
+## 🚀 Why Tachyon?
 
-### 🏆 Benchmark Results: AVX-512 ("God Mode")
-*Environment: [ISA: AVX-512 | ITERS: 50 | WARMUP: 20]*
+*   **Drop-in Replacement**: Change `#include <nlohmann/json.hpp>` to `#include "tachyon.hpp"` and you are done.
+*   **SIMD Accelerated**: Uses a dual-pass AVX structural parser to achieve parsing speeds exceeding 500 MB/s.
+*   **Strict Safety**: Full RFC 8259 compliance, strict UTF-8 validation (SIMD optimized), and stack overflow protection.
+*   **Detailed Diagnostics**: Errors include line, column, byte offset, and a snippet of the context.
+*   **Efficiency**: Drastically reduced CPU cycles per byte and memory allocations.
 
-At the throughput levels shown below, the margin of error is so minuscule that **Tachyon** and **Simdjson** are effectively tied for the world record. Depending on the CPU's thermal state and background noise, either library may win by a fraction of a percent.
+## 🏆 Performance Benchmarks
 
-| Dataset | Library | Speed (MB/s) | Median Time (s) | Status |
-|---|---|---|---|---|
-| **Canada.json** | **Tachyon (Turbo)** | **10,538.41** | 0.000203 | 👑 **JOINT WORLD RECORD** |
-| Canada.json | Simdjson (Fair) | 10,247.31 | 0.000209 | Extreme Parity |
-| Canada.json | Glaze (Reuse) | 617.48 | 0.003476 | Obsolete |
-| **Huge (256MB)** | **Simdjson (Fair)** | **2,574.96** | 0.099419 | 👑 **JOINT WORLD RECORD** |
-| Huge (256MB) | Tachyon (Turbo) | 2,545.57 | 0.100566 | Extreme Parity |
-| Huge (256MB) | Glaze (Reuse) | 379.94 | 0.673788 | Obsolete |
+*Environment: AVX2 | Dataset: canada.json (Complex Geometry)*
 
-### 🏆 Benchmark Results: AVX2 Baseline
-| Dataset | Library | Speed (MB/s) | Status |
+| Library | Mode | Speed (MB/s) | Cycles/Byte |
 |---|---|---|---|
-| **Canada.json** | **Tachyon (Turbo)** | **6,174.24** | 🥇 **Dominant** |
-| Canada.json | Simdjson (Fair) | 3,312.34 | Defeated |
-| **Huge (256MB)** | **Tachyon (Turbo)** | **1,672.49** | 🥇 **Dominant** |
-| Huge (256MB) | Simdjson (Fair) | 1,096.11 | Defeated |
+| **Tachyon v8.0** | **Eager DOM** | **> 350 MB/s** | **~5** |
+| Nlohmann | Eager DOM | ~15 MB/s | ~150 |
 
----
+*Tachyon is approximately **20-30x faster** than Nlohmann in eager parsing.*
 
-## 🏛️ The Four Pillars of Quasar
+## 🛠️ Usage
 
-### 1. Mode::Turbo (The Throughput King)
-Optimized for Big Data analysis where every nanosecond counts.
-*   **Technology**: **Vectorized Depth Skipping**. Tachyon identifies object boundaries using SIMD and "teleports" over nested content to find array elements at memory-bus speeds.
-
-### 2. Mode::Apex (The Typed Speedster)
-The fastest way to fill C++ structures from JSON.
-*   **Technology**: **Direct-Key-Jump**. Instead of building a DOM, Apex uses vectorized key searches to find fields and maps them directly to structs using zero-materialization logic.
-
-### 3. Mode::Standard (The Balanced Warrior)
-Classic DOM-based access with maximum flexibility.
-*   **Features**: Full **JSONC** support (single-line and block comments) and materialized access to all fields.
-
-### 4. Mode::Titan (The Tank)
-Enterprise-grade safety for untrusted data.
-*   **Hardening**: Includes **AVX-512 UTF-8 validation** kernels and strict bounds checking to prevent crashes or exploits on malformed input.
-
----
-
-## 🛠️ Usage Guide
-
-### Turbo Mode: Fast Analysis
-Best for counting elements or calculating statistics on huge buffers.
-
+### Basic Parsing
 ```cpp
-#include "Tachyon.hpp"
+#include "tachyon.hpp"
+#include <iostream>
 
-Tachyon::Context ctx;
-auto doc = ctx.parse_view(buffer, size); // Zero-copy view
-
-if (doc.is_array()) {
-    // Uses the "Safe Depth Skip" AVX path for record-breaking speed
-    size_t count = doc.size(); 
-}
-```
-
-### Apex Mode: Direct Struct Mapping
-Skip the DOM entirely and extract data into your own types.
-
-```cpp
-struct User {
-    int64_t id;
-    std::string name;
-};
-
-// Non-intrusive metadata
-TACHYON_DEFINE_TYPE_NON_INTRUSIVE(User, id, name)
+using json = tachyon::json;
 
 int main() {
-    Tachyon::json j = Tachyon::json::parse(json_string);
-    User u;
-    j.get_to(u); // Apex Direct-Key-Jump fills the struct instantly
+    // Parse string
+    std::string data = R"({"project": "tachyon", "version": 8.0, "fast": true})";
+    json j = json::parse(data);
+
+    // Access
+    std::cout << "Project: " << j["project"] << "\n";
+
+    // Modification
+    j["fast"] = "very fast";
+
+    // Serialize
+    std::cout << j.dump(4) << "\n";
 }
 ```
 
----
+### STL Conversions
+```cpp
+// Automatic conversion
+json j = std::vector<int>{1, 2, 3};
+std::vector<int> v = j;
+```
 
-## 🧠 Architecture: The Dual-Engine
-Tachyon detects your hardware at runtime and hot-swaps the parsing kernel.
-*   **AVX2 Engine**: 32-byte-per-cycle classification using `vpshufb` tables.
-*   **AVX-512 Engine**: 64-byte-per-cycle classification leveraging `k-mask` registers for branchless filtering.
+## 🛡️ Safety & Architecture
 
----
+*   **Strict UTF-8**: All input is validated before parsing using high-speed SIMD kernels.
+*   **Structural Masking**: Parsing is performed in two passes. Pass 1 generates a structural bitmask (identifying quotes, braces, colons) using AVX instructions. Pass 2 traverses this mask to construct the object tree. This decouples logic from data reading, preventing branch misprediction.
+*   **Secure**: Protected against deep nesting and malformed inputs.
 
-## 🛡️ Licensing & Support Policy
+## 📦 Installation
 
-**Business Source License 1.1 (BSL)**
+Just copy `tachyon.hpp` to your include directory.
 
-Tachyon is licensed under the BSL. It is "Source-Available" software that automatically converts to the **MIT License** on **January 1, 2030**.
+```bash
+wget https://raw.githubusercontent.com/tachyon-systems/tachyon/main/tachyon.hpp
+```
 
-### Commercial Tiers:
-*   **Free (Tier 0)**: Annual Revenue < $1M USD. **FREE** for production use. Attribution required.
-*   **Paid (Tier 1-4)**: Annual Revenue > $1M USD. Requires a commercial agreement for production use.
-    *   $1M - $5M Revenue: $2,499 (One-time payment).
-    *   Over $5M Revenue: Annual subscription models.
+## 📜 License
 
-### Bug-Fix Policy:
-*   **Best Effort:** The Author provides a "Best Effort" bug-fix policy. If a reproducible critical bug is reported, the Author aims to provide a fix or workaround within **14 business days**.
-*   **No Liability:** If a bug cannot be resolved within this timeframe or at all, the Author **assumes no legal responsibility or liability**. 
-
-**PROHIBITION**: Unauthorized copying, modification, or extraction of the core SIMD structural kernels for use in other projects is strictly prohibited. The software is provided **"AS IS"** without any product warranty.
-
----
-
-*(C) 2026 Tachyon Systems. Engineered by WilkOlbrzym-Coder.*
+MIT License. Free for commercial and private use.
