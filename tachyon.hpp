@@ -167,7 +167,8 @@ struct TachyonString {
     bool operator==(const std::string& rhs) const { return len == rhs.size() && memcmp(ptr, rhs.data(), len) == 0; }
 };
 
-struct TachyonObjectEntry;
+struct TachyonObjectEntry_Real;
+
 struct TachyonObject {
     void* ptr;
     uint32_t len;
@@ -200,11 +201,11 @@ public:
     json(std::nullptr_t) : m_type(value_t::null) {}
     json(bool v) : m_type(value_t::boolean) { m_value.boolean = v; }
 
-    // Explicit to avoid operator<< ambiguity
-    explicit json(int64_t v) : m_type(value_t::number_integer) { m_value.number_integer = v; }
-    explicit json(int v) : m_type(value_t::number_integer) { m_value.number_integer = v; }
-    explicit json(double v) : m_type(value_t::number_float) { m_value.number_float = v; }
-    explicit json(const char* s) {
+    // Implicit for compatibility
+    json(int64_t v) : m_type(value_t::number_integer) { m_value.number_integer = v; }
+    json(int v) : m_type(value_t::number_integer) { m_value.number_integer = v; }
+    json(double v) : m_type(value_t::number_float) { m_value.number_float = v; }
+    json(const char* s) {
         m_type = value_t::string;
         size_t len = std::strlen(s);
         char* d = (char*)Arena::get().allocate(len + 1);
@@ -212,7 +213,7 @@ public:
         d[len] = 0;
         m_value.string = {d, (uint32_t)len};
     }
-    explicit json(const std::string& s) {
+    json(const std::string& s) {
         m_type = value_t::string;
         char* d = (char*)Arena::get().allocate(s.size() + 1);
         std::memcpy(d, s.data(), s.size());
@@ -220,9 +221,25 @@ public:
         m_value.string = {d, (uint32_t)s.size()};
     }
 
+    // Generic constructor for custom types
+    template <typename T, typename std::enable_if<!std::is_convertible<T*, json*>::value &&
+                                                  !std::is_convertible<T*, const char*>::value &&
+                                                  !std::is_same<T, std::string>::value &&
+                                                  !std::is_arithmetic<T>::value, int>::type = 0>
+    json(const T& t) : m_type(value_t::null) {
+        to_json(*this, t);
+    }
+
     // Copy/Move
     json(const json&) = default;
     json& operator=(const json&) = default;
+
+    // Assignment operators
+    json& operator=(int v) { m_type = value_t::number_integer; m_value.number_integer = v; return *this; }
+    json& operator=(double v) { m_type = value_t::number_float; m_value.number_float = v; return *this; }
+    json& operator=(bool v) { m_type = value_t::boolean; m_value.boolean = v; return *this; }
+    json& operator=(const char* s) { return *this = json(s); }
+    json& operator=(const std::string& s) { return *this = json(s); }
 
     // Accessors
     bool is_null() const { return m_type == value_t::null; }
@@ -232,17 +249,52 @@ public:
     bool is_number() const { return m_type == value_t::number_integer || m_type == value_t::number_float; }
     bool is_boolean() const { return m_type == value_t::boolean; }
 
-    template<typename T> T get() const;
+    template<typename T>
+    typename std::enable_if<std::is_same<T, int>::value, T>::type get() const {
+        return (int)m_value.number_integer;
+    }
+    template<typename T>
+    typename std::enable_if<std::is_same<T, double>::value, T>::type get() const {
+        return m_value.number_float;
+    }
+    template<typename T>
+    typename std::enable_if<std::is_same<T, bool>::value, T>::type get() const {
+        return m_value.boolean;
+    }
+    template<typename T>
+    typename std::enable_if<std::is_same<T, std::string>::value, T>::type get() const {
+        if (m_type == value_t::string) return m_value.string.to_std();
+        return std::string();
+    }
+    template<typename T>
+    typename std::enable_if<!std::is_arithmetic<T>::value && !std::is_same<T, std::string>::value, T>::type get() const {
+        T t;
+        from_json(*this, t);
+        return t;
+    }
     template<typename T> void get_to(T& t) const { t = get<T>(); }
 
-    // Conversions (Implicit allowed for int/double to make usage easy? NO, user wants explicit?
-    // Actually Nlohmann allows implicit. But ambiguity...
-    // I will keep implicit conversions OUT, require .get<T>().
-    // But operator int() const is defined.
-    // I will make conversion operators explicit if possible?
-    // No, standard `int x = j` is nice.
-    // The ambiguity in benchmark was `out << i`. `json(int)` constructor.
-    // I made constructor explicit. Conversion operator can stay implicit.
+    // Comparisons
+    bool operator==(const char* rhs) const {
+        if (m_type == value_t::string) return m_value.string == rhs;
+        return false;
+    }
+    bool operator==(const std::string& rhs) const {
+        if (m_type == value_t::string) return m_value.string == rhs;
+        return false;
+    }
+    bool operator==(int rhs) const {
+        if (m_type == value_t::number_integer) return m_value.number_integer == rhs;
+        if (m_type == value_t::number_float) return m_value.number_float == (double)rhs;
+        return false;
+    }
+    bool operator==(double rhs) const {
+        if (m_type == value_t::number_float) return m_value.number_float == rhs;
+        if (m_type == value_t::number_integer) return (double)m_value.number_integer == rhs;
+        return false;
+    }
+
+    // Conversions
     operator int() const { return (int)m_value.number_integer; }
     operator double() const { return m_value.number_float; }
     operator bool() const { return m_value.boolean; }
@@ -264,7 +316,7 @@ public:
         return 0;
     }
 
-    // Iterators
+    // Items iterator
     struct item_proxy {
         TachyonString k;
         json& v;
@@ -300,17 +352,6 @@ struct json::iterator {
     item_proxy operator*() { return {ptr->key, ptr->value}; }
 };
 
-template<typename T>
-T json::get() const {
-    if (std::is_same<T, int>::value) return (T)(int)m_value.number_integer;
-    if (std::is_same<T, double>::value) return (T)m_value.number_float;
-    if (std::is_same<T, bool>::value) return (T)m_value.boolean;
-    if (std::is_same<T, std::string>::value) {
-        if (m_type == value_t::string) return (T)m_value.string.to_std();
-        return T();
-    }
-    return T();
-}
 
 inline json& json::operator[](size_t idx) { return ((json*)m_value.array.ptr)[idx]; }
 inline const json& json::operator[](size_t idx) const { return ((json*)m_value.array.ptr)[idx]; }
@@ -411,6 +452,9 @@ inline void json::dump_internal(std::string& s) const {
 
 inline std::ostream& operator<<(std::ostream& os, const json& j) { os << j.dump(); return os; }
 
+} // namespace tachyon
+
+namespace tachyon {
 namespace parser {
 
 struct StackItem { value_t type; size_t start_idx; };
@@ -577,11 +621,17 @@ inline json json::parse(const std::string& s) {
     return parser::val_stack.back();
 }
 
+} // namespace tachyon
+
+// -----------------------------------------------------------------------------
+// COMPATIBILITY MACROS
+// -----------------------------------------------------------------------------
 #ifdef TACHYON_COMPATIBILITY_MODE
 namespace nlohmann = tachyon;
 #define NLOHMANN_JSON_TPL tachyon::json
 #endif
 
+// Macros
 #define NLOHMANN_JSON_PASTE(func, ...) NLOHMANN_JSON_PASTE_IMP(func, __VA_ARGS__)
 #define NLOHMANN_JSON_PASTE_IMP(func, ...) func(__VA_ARGS__)
 #define NLOHMANN_JSON_TO(v1) nlohmann_json_j[#v1] = nlohmann_json_t.v1;
@@ -608,7 +658,5 @@ namespace nlohmann = tachyon;
         NLOHMANN_JSON_PASTE4, \
         NLOHMANN_JSON_PASTE3, \
         NLOHMANN_JSON_PASTE2)(__VA_ARGS__))
-
-} // namespace tachyon
 
 #endif // TACHYON_HPP

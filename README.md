@@ -26,7 +26,7 @@ Tachyon adapts to your build environment:
 | Metric | Nlohmann JSON (v3.12) | Tachyon Supernova (C++17) | Improvement |
 | :--- | :--- | :--- | :--- |
 | **Allocations** | ~8,700,000 | **~20** | **~500,000x Less** |
-| **Throughput** | ~16.5 MB/s | ~13 MB/s | **Zero Jitter** |
+| **Throughput** | ~16.2 MB/s | ~12.6 MB/s | **Zero Jitter** |
 | **Latency** | Unpredictable (Malloc locks) | **Constant** | **Real-time Safe** |
 | **Cache Friendly** | High Fragmentation | **Contiguous Arena** | **L1/L2 Optimized** |
 
