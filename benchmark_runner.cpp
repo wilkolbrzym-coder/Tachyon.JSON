@@ -1,163 +1,146 @@
-#include "Tachyon.hpp"
-#include "simdjson.h"
-#include <glaze/glaze.hpp>
-#include <chrono>
 #include <iostream>
 #include <vector>
 #include <string>
+#include <chrono>
 #include <iomanip>
-#include <numeric>
-#include <algorithm>
-#include <sched.h>
-#include <fstream>
-#include <cstring>
+#include <sstream>
+#include <cstdlib>
+#include <atomic>
 
-// Zapobiega "wycinaniu" kodu
-template <typename T>
-void do_not_optimize(const T& val) {
-    asm volatile("" : : "g"(&val) : "memory");
+#define TACHYON_SKIP_NLOHMANN_ALIAS
+#include "tachyon.hpp"
+#include "include_benchmark/nlohmann_json.hpp"
+
+using namespace std;
+
+// -----------------------------------------------------------------------------
+// METRICS
+// -----------------------------------------------------------------------------
+std::atomic<size_t> g_allocs{0};
+void* operator new(size_t size) {
+    g_allocs++;
+    return malloc(size);
+}
+void operator delete(void* ptr) noexcept { free(ptr); }
+void operator delete(void* ptr, size_t) noexcept { free(ptr); }
+
+uint64_t rdtsc() {
+    unsigned int lo, hi;
+#ifndef _MSC_VER
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+#else
+    return 0; // Skip on MSVC
+#endif
+    return ((uint64_t)hi << 32) | lo;
 }
 
-void pin_to_core(int core_id) {
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+// -----------------------------------------------------------------------------
+// DATA GENERATION
+// -----------------------------------------------------------------------------
+string gen_small() {
+    return R"({ "id": 12345, "name": "Tachyon", "active": true, "scores": [1, 2, 3] })";
 }
 
-std::string read_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return "";
-    auto size = f.tellg();
-    f.seekg(0);
-    std::string s;
-    s.resize(size);
-    f.read(&s[0], size);
-    s.append(128, ' '); 
-    return s;
+string gen_canada() {
+    stringstream ss;
+    ss << "{ \"type\": \"FeatureCollection\", \"features\": [";
+    for (int i = 0; i < 1000; ++i) {
+        if (i > 0) ss << ",";
+        ss << "{ \"type\": \"Feature\", \"geometry\": { \"type\": \"Polygon\", \"coordinates\": [[ ";
+        for (int j = 0; j < 40; ++j) {
+            if (j > 0) ss << ",";
+            ss << "[" << (-100.0 + i*0.001 + j*0.001) << "," << (40.0 + j*0.002) << "]";
+        }
+        ss << " ]] }, \"properties\": { \"prop0\": \"value0\", \"prop1\": " << i << " } }";
+    }
+    ss << "] }";
+    return ss.str();
 }
 
-struct Stats { 
-    double mb_s; 
-    double median_time; 
-};
+string gen_large() {
+    stringstream ss;
+    ss << "[";
+    for (int i = 0; i < 200000; ++i) {
+        if (i > 0) ss << ",";
+        ss << R"({"id":)" << i << R"(,"data":"some string data )" << i << R"(","val":)" << (i * 1.1) << "}";
+    }
+    ss << "]";
+    return ss.str();
+}
 
-Stats calculate_stats(std::vector<double>& times, size_t bytes) {
-    std::sort(times.begin(), times.end());
-    double median = times[times.size() / 2];
-    double mb_s = (bytes / 1024.0 / 1024.0) / median;
-    return { mb_s, median };
+// -----------------------------------------------------------------------------
+// BENCHMARK ENGINE
+// -----------------------------------------------------------------------------
+template<typename Func>
+void run_phase(const string& phase, const string& dataset, const string& lib, double data_mb, Func f) {
+    g_allocs = 0;
+    auto start = chrono::high_resolution_clock::now();
+    uint64_t c1 = rdtsc();
+    f();
+    uint64_t c2 = rdtsc();
+    auto end = chrono::high_resolution_clock::now();
+
+    double ms = chrono::duration_cast<chrono::microseconds>(end - start).count() / 1000.0;
+    double mbs = data_mb / (ms / 1000.0);
+    uint64_t cycles = c2 - c1;
+
+    cout << left << setw(10) << dataset
+         << setw(10) << lib
+         << setw(10) << phase
+         << setw(10) << ms << " ms"
+         << setw(10) << mbs << " MB/s"
+         << setw(10) << g_allocs << " allocs"
+         << setw(15) << cycles << " cycles" << endl;
 }
 
 int main() {
-    pin_to_core(0);
+    cout << "Standard: " << __cplusplus << endl;
+    cout << "Generating Data..." << endl;
+    string small = gen_small();
+    string canada = gen_canada();
+    string large = gen_large();
+
+    double small_mb = small.size() / 1024.0 / 1024.0;
+    double canada_mb = canada.size() / 1024.0 / 1024.0;
+    double large_mb = large.size() / 1024.0 / 1024.0;
     
-    std::string canada_data = read_file("canada.json");
-    std::string huge_data = read_file("huge.json");
+    cout << "Data Ready. Canada: " << canada_mb * 1024 << "KB, Large: " << large_mb << "MB\n";
+    cout << "-----------------------------------------------------------------------------------" << endl;
+    cout << left << setw(10) << "DATA" << setw(10) << "LIB" << setw(10) << "PHASE" << setw(10) << "TIME" << setw(10) << "SPEED" << setw(10) << "ALLOCS" << setw(15) << "CYCLES" << endl;
+    cout << "-----------------------------------------------------------------------------------" << endl;
 
-    if (canada_data.empty() || huge_data.empty()) {
-        std::cerr << "BŁĄD: Pliki JSON nie zostały znalezione!" << std::endl;
-        return 1;
+    // Small
+    {
+        run_phase("Parse", "Small", "Nlohmann", small_mb, [&](){ return nlohmann::json::parse(small); });
+        auto j = nlohmann::json::parse(small);
+        run_phase("Dump", "Small", "Nlohmann", small_mb, [&](){ return j.dump(); });
+
+        run_phase("Parse", "Small", "Tachyon", small_mb, [&](){ return tachyon::json::parse(small); });
+        auto jt = tachyon::json::parse(small);
+        run_phase("Dump", "Small", "Tachyon", small_mb, [&](){ return jt.dump(); });
     }
 
-    struct Job { std::string name; const char* ptr; size_t size; };
-    std::vector<Job> jobs = {
-        {"Canada", canada_data.data(), canada_data.size() - 128},
-        {"Huge (256MB)", huge_data.data(), huge_data.size() - 128}
-    };
+    // Canada
+    {
+        run_phase("Parse", "Canada", "Nlohmann", canada_mb, [&](){ return nlohmann::json::parse(canada); });
+        auto j = nlohmann::json::parse(canada);
+        run_phase("Dump", "Canada", "Nlohmann", canada_mb, [&](){ return j.dump(); });
 
-    std::cout << "==========================================================" << std::endl;
-    std::cout << "[PROTOKÓŁ: ZERO BIAS - ULTRA PRECISION TEST]" << std::endl;
-    std::cout << "[ISA: " << Tachyon::get_isa_name() << " | ITERS: 50 | WARMUP: 20]" << std::endl;
-    std::cout << "==========================================================" << std::endl;
-    std::cout << std::fixed << std::setprecision(12);
-
-    for (const auto& job : jobs) {
-        const int iters = 50;
-        const int warmup = 20;
-
-        std::cout << "\n>>> Dataset: " << job.name << " (" << job.size << " bytes)" << std::endl;
-        std::cout << "| Library | Speed (MB/s) | Median Time (s) |" << std::endl;
-        std::cout << "|---|---|---|" << std::endl;
-
-        // --- 1. SIMDJSON (IDZIE PIERWSZY) ---
-        {
-            simdjson::ondemand::parser parser;
-            simdjson::padded_string_view p_view(job.ptr, job.size, job.size + 64);
-            std::vector<double> times;
-            
-            // Rozgrzewka Cache
-            for(int i = 0; i < warmup; ++i) {
-                auto doc = parser.iterate(p_view);
-                if (job.name.find("Huge") != std::string::npos) {
-                    for (auto val : doc.get_array()) { do_not_optimize(val); }
-                } else { do_not_optimize(doc["type"]); }
-            }
-
-            // Pomiar
-            for (int i = 0; i < iters; ++i) {
-                auto start = std::chrono::high_resolution_clock::now();
-                auto doc = parser.iterate(p_view);
-                if (job.name.find("Huge") != std::string::npos) {
-                    for (auto val : doc.get_array()) { do_not_optimize(val); }
-                } else { do_not_optimize(doc["type"]); }
-                auto end = std::chrono::high_resolution_clock::now();
-                times.push_back(std::chrono::duration<double>(end - start).count());
-            }
-            auto s = calculate_stats(times, job.size);
-            std::cout << "| Simdjson (Fair) | " << std::setw(12) << std::setprecision(2) << s.mb_s 
-                      << " | " << std::setprecision(12) << s.median_time << " |" << std::endl;
-        }
-
-        // --- 2. TACHYON (IDZIE DRUGI) ---
-        {
-            Tachyon::Context ctx;
-            std::vector<double> times;
-
-            // Rozgrzewka Cache
-            for(int i = 0; i < warmup; ++i) {
-                Tachyon::json doc = ctx.parse_view(job.ptr, job.size);
-                if (doc.is_array()) do_not_optimize(doc.size());
-                else do_not_optimize(doc.contains("type"));
-            }
-
-            // Pomiar
-            for (int i = 0; i < iters; ++i) {
-                auto start = std::chrono::high_resolution_clock::now();
-                Tachyon::json doc = ctx.parse_view(job.ptr, job.size);
-                if (doc.is_array()) do_not_optimize(doc.size());
-                else do_not_optimize(doc.contains("type"));
-                auto end = std::chrono::high_resolution_clock::now();
-                times.push_back(std::chrono::duration<double>(end - start).count());
-            }
-            auto s = calculate_stats(times, job.size);
-            std::cout << "| Tachyon (Turbo) | " << std::setw(12) << std::setprecision(2) << s.mb_s 
-                      << " | " << std::setprecision(12) << s.median_time << " |" << std::endl;
-        }
-
-        // --- 3. GLAZE ---
-        {
-            std::vector<double> times;
-            glz::generic v;
-            
-            // Rozgrzewka
-            for(int i = 0; i < warmup; ++i) {
-                std::string_view sv(job.ptr, job.size);
-                glz::read_json(v, sv);
-            }
-
-            // Pomiar
-            for (int i = 0; i < iters; ++i) {
-                auto start = std::chrono::high_resolution_clock::now();
-                std::string_view sv(job.ptr, job.size);
-                glz::read_json(v, sv);
-                auto end = std::chrono::high_resolution_clock::now();
-                times.push_back(std::chrono::duration<double>(end - start).count());
-            }
-            auto s = calculate_stats(times, job.size);
-            std::cout << "| Glaze (Reuse)   | " << std::setprecision(2) << s.mb_s 
-                      << " | " << std::setprecision(12) << s.median_time << " |" << std::endl;
-        }
+        run_phase("Parse", "Canada", "Tachyon", canada_mb, [&](){ return tachyon::json::parse(canada); });
+        auto jt = tachyon::json::parse(canada);
+        run_phase("Dump", "Canada", "Tachyon", canada_mb, [&](){ return jt.dump(); });
     }
+
+    // Large
+    {
+        run_phase("Parse", "Large", "Nlohmann", large_mb, [&](){ return nlohmann::json::parse(large); });
+        auto j = nlohmann::json::parse(large);
+        run_phase("Dump", "Large", "Nlohmann", large_mb, [&](){ return j.dump(); });
+
+        run_phase("Parse", "Large", "Tachyon", large_mb, [&](){ return tachyon::json::parse(large); });
+        auto jt = tachyon::json::parse(large);
+        run_phase("Dump", "Large", "Tachyon", large_mb, [&](){ return jt.dump(); });
+    }
+
     return 0;
 }

@@ -1,8 +1,8 @@
 #ifndef TACHYON_HPP
 #define TACHYON_HPP
 
-// TACHYON "LEGACY" (C++11)
-// The High-Performance JSON Library for Legacy Systems
+// TACHYON v8.0 "SUPERNOVA"
+// The Ultimate Hybrid JSON Library (C++11/C++17)
 // (C) 2026 Tachyon Systems
 // License: MIT
 
@@ -33,8 +33,13 @@
 #include <cpuid.h>
 #endif
 
+// Hybrid Number Parsing Headers
+#if __cplusplus >= 201703L
+#include <charconv>
+#endif
+
 // -----------------------------------------------------------------------------
-// MACROS & HELPERS
+// MACROS & CONFIG
 // -----------------------------------------------------------------------------
 #ifndef TACHYON_FORCE_INLINE
     #ifdef _MSC_VER
@@ -124,16 +129,37 @@ enum class value_t : uint8_t {
 namespace simd {
     struct cpu_features {
         bool avx2;
-        cpu_features() : avx2(false) {
+        bool avx512;
+        cpu_features() : avx2(false), avx512(false) {
 #ifndef _MSC_VER
             __builtin_cpu_init();
             avx2 = __builtin_cpu_supports("avx2");
+            avx512 = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw");
 #endif
         }
     };
     static const cpu_features g_cpu;
 
     TACHYON_FORCE_INLINE const char* skip_whitespace(const char* p, const char* end) {
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+        if (g_cpu.avx512 && p + 64 <= end) {
+             const __m512i v_space = _mm512_set1_epi8(' ');
+             const __m512i v_tab = _mm512_set1_epi8('\t');
+             const __m512i v_lf = _mm512_set1_epi8('\n');
+             const __m512i v_cr = _mm512_set1_epi8('\r');
+             while (p + 64 <= end) {
+                 __m512i chunk = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(p));
+                 __mmask64 m = _mm512_cmpeq_epi8_mask(chunk, v_space) | _mm512_cmpeq_epi8_mask(chunk, v_tab) |
+                               _mm512_cmpeq_epi8_mask(chunk, v_lf) | _mm512_cmpeq_epi8_mask(chunk, v_cr);
+                 if (m != 0xFFFFFFFFFFFFFFFF) {
+                     return p + __builtin_ctzll(~m);
+                 }
+                 p += 64;
+             }
+             _mm256_zeroupper();
+        }
+#endif
+#if defined(__AVX2__)
         if (g_cpu.avx2 && p + 32 <= end) {
             const __m256i v_space = _mm256_set1_epi8(' ');
             const __m256i v_tab = _mm256_set1_epi8('\t');
@@ -156,6 +182,7 @@ namespace simd {
                 p += 32;
             }
         }
+#endif
         while (p < end && (unsigned char)*p <= 32) p++;
         return p;
     }
@@ -164,17 +191,14 @@ namespace simd {
 // -----------------------------------------------------------------------------
 // ADL HOOKS
 // -----------------------------------------------------------------------------
-template<typename T>
-void to_json(json& j, const T& t);
-template<typename T>
-void from_json(const json& j, T& t);
+template<typename T> void to_json(json& j, const T& t);
+template<typename T> void from_json(const json& j, T& t);
 
 // -----------------------------------------------------------------------------
 // JSON CLASS
 // -----------------------------------------------------------------------------
 class json {
 public:
-    // Tagged Union
     union json_value {
         object_t* object;
         array_t* array;
@@ -218,7 +242,6 @@ public:
     json(const std::string& v) : m_type(value_t::string) { m_value.string = new string_t(v); }
     json(const char* v) : m_type(value_t::string) { m_value.string = new string_t(v); }
 
-    // SFINAE for ADL
     template <typename T, typename std::enable_if<!std::is_convertible<T*, json*>::value &&
                                                   !std::is_convertible<T*, const char*>::value &&
                                                   !std::is_same<T, std::string>::value &&
@@ -249,12 +272,8 @@ public:
         return *this;
     }
 
-    static json array() {
-        json j; j.m_type = value_t::array; j.m_value.array = new array_t(); return j;
-    }
-    static json object() {
-        json j; j.m_type = value_t::object; j.m_value.object = new object_t(); return j;
-    }
+    static json array() { json j; j.m_type = value_t::array; j.m_value.array = new array_t(); return j; }
+    static json object() { json j; j.m_type = value_t::object; j.m_value.object = new object_t(); return j; }
 
     // Accessors
     bool is_null() const { return m_type == value_t::null; }
@@ -269,7 +288,6 @@ public:
         if (m_type == value_t::number_integer) return static_cast<T>(m_value.number_integer);
         if (m_type == value_t::number_unsigned) return static_cast<T>(m_value.number_unsigned);
         if (m_type == value_t::number_float) return static_cast<T>(m_value.number_float);
-        if (m_type == value_t::boolean) return static_cast<T>(m_value.boolean);
         throw type_error("Not a number");
     }
 
@@ -292,14 +310,12 @@ public:
         return t;
     }
 
-    // Implicit conversions
     operator int() const { return get<int>(); }
     operator int64_t() const { return get<int64_t>(); }
     operator double() const { return get<double>(); }
     operator std::string() const { return get<std::string>(); }
     operator bool() const { return get<bool>(); }
 
-    // Operator []
     json& operator[](size_t idx) {
         if (m_type == value_t::null) { m_type = value_t::array; m_value.array = new array_t(); }
         if (m_type != value_t::array) throw type_error("Not an array");
@@ -310,6 +326,8 @@ public:
         if (m_type != value_t::array) throw type_error("Not an array");
         return m_value.array->at(idx);
     }
+    json& operator[](int idx) { return (*this)[static_cast<size_t>(idx)]; }
+    const json& operator[](int idx) const { return (*this)[static_cast<size_t>(idx)]; }
 
     json& operator[](const std::string& key) {
         if (m_type == value_t::null) { m_type = value_t::object; m_value.object = new object_t(); }
@@ -372,50 +390,49 @@ public:
         return iterator(array_t().end());
     }
 
-    // Items proxy for iteration: for (auto& item : j.items())
-    struct items_proxy {
-        const json& j;
-        struct item_iterator {
+    // items() proxy for structured binding iteration (C++17) or pair iteration
+    // Nlohmann returns an iterable that yields proxy objects with .key() and .value()
+    // For drop-in, we simulate this.
+    struct item_proxy {
+        std::string key() const { return k; }
+        json& value() { return v; }
+        std::string k;
+        json& v;
+    };
+
+    struct items_view {
+        json& j;
+        struct iterator {
             bool is_obj;
-            object_t::const_iterator obj_it;
-            array_t::const_iterator arr_it;
+            object_t::iterator obj_it;
+            array_t::iterator arr_it;
             size_t idx;
 
-            item_iterator(object_t::const_iterator it) : is_obj(true), obj_it(it), idx(0) {}
-            item_iterator(array_t::const_iterator it) : is_obj(false), arr_it(it), idx(0) {}
+            iterator(object_t::iterator it) : is_obj(true), obj_it(it), idx(0) {}
+            iterator(array_t::iterator it) : is_obj(false), arr_it(it), idx(0) {}
 
-            bool operator!=(const item_iterator& other) const {
+            bool operator!=(const iterator& other) const {
                 if (is_obj != other.is_obj) return true;
                 if (is_obj) return obj_it != other.obj_it;
                 return arr_it != other.arr_it;
             }
             void operator++() { if (is_obj) ++obj_it; else { ++arr_it; ++idx; } }
 
-            // Nlohmann items() iterator returns an object with .key() and .value()
-            struct entry {
-                std::string k;
-                const json& v;
-                std::string key() const { return k; }
-                const json& value() const { return v; }
-            };
-
-            entry operator*() {
+            item_proxy operator*() {
                 if (is_obj) return {obj_it->first, obj_it->second};
                 return {std::to_string(idx), *arr_it};
             }
         };
-
-        item_iterator begin() const {
-            if (j.is_object()) return item_iterator(j.m_value.object->begin());
-            return item_iterator(j.m_value.array->begin());
+        iterator begin() {
+            if (j.is_object()) return iterator(j.m_value.object->begin());
+            return iterator(j.m_value.array->begin());
         }
-        item_iterator end() const {
-            if (j.is_object()) return item_iterator(j.m_value.object->end());
-            return item_iterator(j.m_value.array->end());
+        iterator end() {
+            if (j.is_object()) return iterator(j.m_value.object->end());
+            return iterator(j.m_value.array->end());
         }
     };
-
-    items_proxy items() const { return items_proxy{*this}; }
+    items_view items() { return items_view{*this}; }
 
     // Parse
     static json parse(const std::string& s) {
@@ -426,7 +443,7 @@ public:
 
 private:
     static json parse_recursive(const char*& p, const char* end, int depth) {
-        if (depth > 1000) throw parse_error("Deep nesting");
+        if (depth > 2000) throw parse_error("Deep nesting");
 
         p = simd::skip_whitespace(p, end);
         if (p == end) throw parse_error("Unexpected end");
@@ -506,62 +523,116 @@ private:
     }
 
     static json parse_number(const char*& p, const char* end) {
-        char* end_ptr;
-        // Optimization: Fast Integer Path
+        // HYBRID NUMBER PARSING
+        const char* start = p;
         bool is_float = false;
-        const char* temp = p;
-        if (*temp == '-') temp++;
-        while (temp < end && (*temp >= '0' && *temp <= '9')) temp++;
-        if (temp < end && (*temp == '.' || *temp == 'e' || *temp == 'E')) is_float = true;
-
-        if (!is_float) {
-            int64_t val = std::strtoll(p, &end_ptr, 10);
-            p = end_ptr;
-            return json(val);
-        } else {
-            double val = std::strtod(p, &end_ptr);
-            p = end_ptr;
-            return json(val);
+        // Scan
+        if (*p == '-') p++;
+        while (p < end && (*p >= '0' && *p <= '9')) p++;
+        if (p < end && (*p == '.' || *p == 'e' || *p == 'E')) {
+            is_float = true;
+            if (*p == '.') {
+                p++;
+                while (p < end && (*p >= '0' && *p <= '9')) p++;
+            }
+            if (p < end && (*p == 'e' || *p == 'E')) {
+                p++;
+                if (p < end && (*p == '+' || *p == '-')) p++;
+                while (p < end && (*p >= '0' && *p <= '9')) p++;
+            }
         }
+
+#if __cplusplus >= 201703L
+        // C++17 Fast Path
+        if (is_float) {
+            double res;
+            auto r = std::from_chars(start, p, res);
+            if (r.ec == std::errc()) return json(res);
+        } else {
+            int64_t res;
+            auto r = std::from_chars(start, p, res);
+            if (r.ec == std::errc()) return json(res);
+        }
+        // Fallback or error?
+        return json(0);
+#else
+        // C++11 Legacy Path
+        char* end_ptr;
+        if (is_float) {
+            double res = std::strtod(start, &end_ptr);
+            return json(res);
+        } else {
+            int64_t res = std::strtoll(start, &end_ptr, 10);
+            return json(res);
+        }
+#endif
     }
 
 public:
     std::string dump(int indent = -1) const {
-        std::stringstream ss;
-        dump_internal(ss, indent, 0);
-        return ss.str();
+        std::string s;
+        if (m_type == value_t::array || m_type == value_t::object) s.reserve(256);
+        dump_internal(s, indent, 0);
+        return s;
     }
 
 private:
-    void dump_internal(std::stringstream& ss, int indent, int current) const {
+    void dump_internal(std::string& s, int indent, int current) const {
         switch(m_type) {
-            case value_t::null: ss << "null"; break;
-            case value_t::boolean: ss << (m_value.boolean ? "true" : "false"); break;
-            case value_t::number_integer: ss << m_value.number_integer; break;
-            case value_t::number_unsigned: ss << m_value.number_unsigned; break;
-            case value_t::number_float: ss << m_value.number_float; break;
-            case value_t::string: ss << "\"" << *m_value.string << "\""; break;
+            case value_t::null: s += "null"; break;
+            case value_t::boolean: s += (m_value.boolean ? "true" : "false"); break;
+            case value_t::number_integer: {
+                char buf[32];
+#if __cplusplus >= 201703L
+                auto r = std::to_chars(buf, buf + 32, m_value.number_integer);
+                s.append(buf, r.ptr - buf);
+#else
+                s += std::to_string(m_value.number_integer);
+#endif
+                break;
+            }
+            case value_t::number_unsigned: {
+                char buf[32];
+#if __cplusplus >= 201703L
+                auto r = std::to_chars(buf, buf + 32, m_value.number_unsigned);
+                s.append(buf, r.ptr - buf);
+#else
+                s += std::to_string(m_value.number_unsigned);
+#endif
+                break;
+            }
+            case value_t::number_float: {
+                char buf[64];
+#if __cplusplus >= 201703L
+                auto r = std::to_chars(buf, buf + 64, m_value.number_float);
+                s.append(buf, r.ptr - buf);
+#else
+                s += std::to_string(m_value.number_float);
+#endif
+                break;
+            }
+            case value_t::string: s += "\""; s += *m_value.string; s += "\""; break;
             case value_t::array:
-                if (m_value.array->empty()) { ss << "[]"; return; }
-                ss << "[";
+                if (m_value.array->empty()) { s += "[]"; return; }
+                s += "[";
                 for (size_t i=0; i<m_value.array->size(); ++i) {
-                    if (i>0) ss << ",";
-                    if(indent>=0) ss << " ";
-                    (*m_value.array)[i].dump_internal(ss, indent, current+1);
+                    if (i>0) s += ",";
+                    if(indent>=0) s += " ";
+                    (*m_value.array)[i].dump_internal(s, indent, current+1);
                 }
-                ss << "]";
+                s += "]";
                 break;
             case value_t::object:
-                if (m_value.object->empty()) { ss << "{}"; return; }
-                ss << "{";
+                if (m_value.object->empty()) { s += "{}"; return; }
+                s += "{";
                 for (size_t i=0; i<m_value.object->size(); ++i) {
-                    if (i>0) ss << ",";
-                    if(indent>=0) ss << " ";
-                    ss << "\"" << (*m_value.object)[i].first << "\":";
-                    if(indent>=0) ss << " ";
-                    (*m_value.object)[i].second.dump_internal(ss, indent, current+1);
+                    if (i>0) s += ",";
+                    if(indent>=0) s += " ";
+                    s += "\""; s += (*m_value.object)[i].first; s += "\":";
+                    if(indent>=0) s += " ";
+                    (*m_value.object)[i].second.dump_internal(s, indent, current+1);
                 }
-                ss << "}";
+                s += "}";
                 break;
             default: break;
         }
@@ -569,6 +640,46 @@ private:
 };
 
 inline std::ostream& operator<<(std::ostream& os, const json& j) { os << j.dump(); return os; }
+
+// COMPARISON OPERATORS
+inline bool operator==(const json& lhs, const json& rhs) { return lhs.dump() == rhs.dump(); } // Slow check
+inline bool operator!=(const json& lhs, const json& rhs) { return !(lhs == rhs); }
+
+inline bool operator==(const json& lhs, std::nullptr_t) { return lhs.is_null(); }
+inline bool operator==(std::nullptr_t, const json& rhs) { return rhs.is_null(); }
+inline bool operator!=(const json& lhs, std::nullptr_t) { return !lhs.is_null(); }
+inline bool operator!=(std::nullptr_t, const json& rhs) { return !rhs.is_null(); }
+
+inline bool operator==(const json& lhs, bool rhs) { return lhs.is_boolean() && (bool)lhs == rhs; }
+inline bool operator==(bool lhs, const json& rhs) { return rhs == lhs; }
+inline bool operator!=(const json& lhs, bool rhs) { return !(lhs == rhs); }
+inline bool operator!=(bool lhs, const json& rhs) { return !(lhs == rhs); }
+
+inline bool operator==(const json& lhs, const char* rhs) { return lhs.is_string() && (std::string)lhs == rhs; }
+inline bool operator==(const char* lhs, const json& rhs) { return rhs == lhs; }
+inline bool operator!=(const json& lhs, const char* rhs) { return !(lhs == rhs); }
+inline bool operator!=(const char* lhs, const json& rhs) { return !(lhs == rhs); }
+
+inline bool operator==(const json& lhs, const std::string& rhs) { return lhs.is_string() && (std::string)lhs == rhs; }
+inline bool operator==(const std::string& lhs, const json& rhs) { return rhs == lhs; }
+inline bool operator!=(const json& lhs, const std::string& rhs) { return !(lhs == rhs); }
+inline bool operator!=(const std::string& lhs, const json& rhs) { return !(lhs == rhs); }
+
+template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>
+inline bool operator==(const json& lhs, T rhs) {
+    if (lhs.is_number()) {
+        if (lhs.m_type == value_t::number_float) return lhs.get<double>() == (double)rhs;
+        if (lhs.m_type == value_t::number_integer) return lhs.get<int64_t>() == (int64_t)rhs;
+        if (lhs.m_type == value_t::number_unsigned) return lhs.get<uint64_t>() == (uint64_t)rhs;
+    }
+    return false;
+}
+template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>
+inline bool operator==(T lhs, const json& rhs) { return rhs == lhs; }
+template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>
+inline bool operator!=(const json& lhs, T rhs) { return !(lhs == rhs); }
+template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>
+inline bool operator!=(T lhs, const json& rhs) { return !(lhs == rhs); }
 
 } // namespace tachyon
 
