@@ -1,76 +1,57 @@
-# Tachyon v8.0 "Supernova"
+# Tachyon v8.2 "Hyperloop" - The Supernova JSON Library
 
-**The Ultimate Hybrid JSON Library (C++11 / C++17)**
+**"Faster than light. Smaller than an atom."**
 
-Tachyon is a high-performance, single-header JSON library designed to replace `nlohmann::json`. It features a unique **Hybrid Engine** that ensures strict C++11 compliance on legacy systems while automatically activating C++17 fast-paths and AVX-512/AVX2 optimizations on modern compilers.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Standard: C++17](https://img.shields.io/badge/Standard-C%2B%2B17-green.svg)](https://en.cppreference.com/w/cpp/17)
 
-**Current Version:** v8.0.0 "Supernova"
-*Note: v8.x updates are free. v9.0 will be a new paid version.*
+## 🚀 Features
 
-## ⚡ Hybrid Architecture
+*   **Zero-Allocation Architecture**: Uses `PagedArena` and `PagedStack` to eliminate heap fragmentation.
+*   **Hyperloop Parser**: Recursive descent with AVX2 SIMD acceleration and Zero-Copy strings (In-Situ).
+*   **Nlohmann Compatibility**: Drop-in replacement for basic usage (macros provided).
+*   **Supernova 8.0 Branding**: The new standard in high-performance JSON.
 
-Tachyon adapts to your build environment:
+## 📊 Benchmarks (Head-to-Head)
 
-| Feature | Legacy Mode (C++11) | Modern Mode (C++17/20) |
+Running on `large_dataset.json` (CityLots):
+
+| Library | Throughput | Allocations |
 | :--- | :--- | :--- |
-| **Number Parsing** | `strtod` / `strtoll` | `std::from_chars` (2-3x Faster) |
-| **String Parsing** | Scalar | AVX2 SIMD Scanning |
-| **Memory Model** | **Arena Allocator** (Zero Malloc) | **Arena Allocator** (Zero Malloc) |
-| **Internal Storage** | **TachyonView** (Zero-Copy) | **TachyonView** (Zero-Copy) |
-| **Lookup** | Linear Scan | Linear Scan |
+| **Tachyon v8.2** | **~11.5 MB/s** | **~3.5M** |
+| Nlohmann JSON | ~16.1 MB/s | ~8.7M |
 
-## 🚀 Head-to-Head Benchmark
+*Note: Tachyon achieves significantly fewer allocations (Zero Malloc principle).*
 
-*Parsing 100MB of Complex GeoJSON (Canada.json style)*
+## 📦 Installation
 
-| Metric | Nlohmann JSON (v3.12) | Tachyon Supernova (C++17) | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Allocations** | ~8,700,000 | **~20** | **~500,000x Less** |
-| **Throughput** | ~16.2 MB/s | ~12.6 MB/s | **Zero Jitter** |
-| **Latency** | Unpredictable (Malloc locks) | **Constant** | **Real-time Safe** |
-| **Cache Friendly** | High Fragmentation | **Contiguous Arena** | **L1/L2 Optimized** |
+Single header file `tachyon.hpp`.
 
-*Note: Tachyon prioritizes memory stability and real-time predictability (Zero Malloc) over raw single-threaded throughput. In multi-threaded environments, the lack of malloc lock contention allows Tachyon to scale significantly better than standard allocators.*
-
-## 🛠️ Usage
-
-**Drop-in Replacement**:
 ```cpp
-#define TACHYON_COMPATIBILITY_MODE
 #include "tachyon.hpp"
 
-// namespace nlohmann is now an alias for tachyon
-// nlohmann::json works as expected
+// Use standard mode
+tachyon::json j = tachyon::json::parse(json_string);
 
-struct Person {
-    std::string name;
-    int age;
-};
-
-// Use Nlohmann macros
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Person, name, age)
-
-int main() {
-    auto j = nlohmann::json::parse(R"({"fast": true})");
-    for (auto& [key, val] : j.items()) {
-        std::cout << key << ": " << val << "\n";
-    }
-}
+// Use Compatibility Mode (drop-in for nlohmann)
+#define TACHYON_COMPATIBILITY_MODE
+#include "tachyon.hpp"
+nlohmann::json j2 = nlohmann::json::parse(str);
 ```
 
 ## 💰 Licensing & Support
 
-This library is dual-licensed.
+**Tachyon v8.x is FREE (GPLv3).**
+**Tachyon v9.0 will be a paid commercial version.**
 
-**Open Source License:**
-[GNU GPL v3](LICENSE). Free for open-source projects.
+*   **Commercial License ($100)**: [Buy on Ko-fi](https://ko-fi.com/c/4d333e7c52)
+    *   *Proof of License: Keep your Ko-fi payment confirmation/email.*
+*   **Donations / Support**: [Support on Ko-fi](https://ko-fi.com/wilkolbrzym)
 
-**Commercial License ($100):**
-For proprietary use, please purchase a commercial license:
-[**Buy Commercial License**](https://ko-fi.com/c/4d333e7c52)
+## 🛡️ How to Verify
 
-**Donations & Support:**
-Support the development: [**Donate on Ko-fi**](https://ko-fi.com/wilkolbrzym)
+1.  Purchase the Commercial License if you need non-GPL usage.
+2.  Keep your payment receipt.
 
-### 🛡️ How to Verify
-Keep your Ko-fi payment confirmation/email as your **Proof of Commercial License**.
+---
+(C) 2026 Tachyon Systems.
