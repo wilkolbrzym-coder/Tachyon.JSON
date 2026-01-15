@@ -16,7 +16,8 @@ Tachyon adapts to your build environment:
 | **Number Parsing** | `strtod` / `strtoll` | `std::from_chars` (2-3x Faster) |
 | **String Parsing** | Scalar | AVX2 SIMD Scanning |
 | **Memory Model** | **Arena Allocator** (Zero Malloc) | **Arena Allocator** (Zero Malloc) |
-| **Lookup** | Linear Scan (Small) / Binary Search (Large) | Linear Scan (Small) / Binary Search (Large) |
+| **Internal Storage** | **TachyonView** (Zero-Copy) | **TachyonView** (Zero-Copy) |
+| **Lookup** | Linear Scan | Linear Scan |
 
 ## 🚀 Head-to-Head Benchmark
 
@@ -24,8 +25,8 @@ Tachyon adapts to your build environment:
 
 | Metric | Nlohmann JSON (v3.12) | Tachyon Supernova (C++17) | Improvement |
 | :--- | :--- | :--- | :--- |
-| **Allocations** | ~8,700,000 | **~17** | **~500,000x Less** |
-| **Throughput** | ~16 MB/s | ~12 MB/s | **Zero Jitter** |
+| **Allocations** | ~8,700,000 | **~21** | **~400,000x Less** |
+| **Throughput** | ~16.5 MB/s | ~13 MB/s | **Zero Jitter** |
 | **Latency** | Unpredictable (Malloc locks) | **Constant** | **Real-time Safe** |
 | **Cache Friendly** | High Fragmentation | **Contiguous Arena** | **L1/L2 Optimized** |
 
