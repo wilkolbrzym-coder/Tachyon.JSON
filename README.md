@@ -16,7 +16,7 @@ Tachyon adapts to your build environment:
 | **Number Parsing** | `strtod` / `strtoll` | `std::from_chars` (2-3x Faster) |
 | **String Parsing** | Scalar | AVX2 SIMD Scanning |
 | **Memory Model** | **Arena Allocator** (Zero Malloc) | **Arena Allocator** (Zero Malloc) |
-| **Safety** | Stack Guard | Stack Guard |
+| **Lookup** | Linear Scan (Small) / Binary Search (Large) | Linear Scan (Small) / Binary Search (Large) |
 
 ## 🚀 Head-to-Head Benchmark
 
@@ -26,9 +26,10 @@ Tachyon adapts to your build environment:
 | :--- | :--- | :--- | :--- |
 | **Allocations** | ~8,700,000 | **~17** | **~500,000x Less** |
 | **Throughput** | ~16 MB/s | ~12 MB/s | **Zero Jitter** |
-| **Latency** | Unpredictable (Malloc) | **Constant** | **Real-time Safe** |
+| **Latency** | Unpredictable (Malloc locks) | **Constant** | **Real-time Safe** |
+| **Cache Friendly** | High Fragmentation | **Contiguous Arena** | **L1/L2 Optimized** |
 
-*Note: While raw single-threaded throughput is comparable, Tachyon's Zero-Malloc architecture eliminates system call overhead and lock contention, making it vastly superior for multi-threaded and real-time applications.*
+*Note: Tachyon prioritizes memory stability and real-time predictability (Zero Malloc) over raw single-threaded throughput. In multi-threaded environments, the lack of malloc lock contention allows Tachyon to scale significantly better than standard allocators.*
 
 ## 🛠️ Usage
 

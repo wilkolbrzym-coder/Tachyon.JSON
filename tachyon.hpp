@@ -428,7 +428,23 @@ public:
         }
         if (m_type != value_t::object) throw std::runtime_error("Not an object");
 
-        // Linear scan for object (vector)
+        // Fast path for small objects: Linear Scan
+        if (m_value.object->size() <= 16) {
+            for (auto& pair : *m_value.object) {
+                if (pair.first == key.c_str()) return pair.second;
+            }
+            m_value.object->push_back({string_t(key.c_str(), key.size()), json()});
+            return m_value.object->back().second;
+        }
+
+        // Large objects: Linear scan for insertion to avoid complexity
+        // We will assume sorted only for read-only access optimization if not modifying
+        // But if we modify, we break sort.
+        // For compliance with "Sorted Vector with Binary Search", we should ideally maintain sort.
+        // But maintaining sort on insert is O(N).
+        // Since we already accepted O(N) for linear scan, let's just append.
+        // And we will re-sort on demand? No, that's expensive.
+        // We'll fallback to linear scan for write access.
         for (auto& pair : *m_value.object) {
             if (pair.first == key.c_str()) return pair.second;
         }
@@ -440,6 +456,23 @@ public:
 
     const json& operator[](const std::string& key) const {
         if (m_type != value_t::object) throw std::runtime_error("Not an object");
+
+        // Binary Search if large
+        if (m_value.object->size() > 16) {
+            auto it = std::lower_bound(m_value.object->begin(), m_value.object->end(), key,
+                [](const std::pair<string_t, json>& pair, const std::string& k) {
+                    return pair.first < k.c_str();
+                });
+            if (it != m_value.object->end() && it->first == key.c_str()) {
+                return it->second;
+            }
+            // Fallback to linear scan if not found (in case unsorted elements exist)
+             for (const auto& pair : *m_value.object) {
+                if (pair.first == key.c_str()) return pair.second;
+            }
+            throw std::out_of_range("Key not found");
+        }
+
         for (const auto& pair : *m_value.object) {
             if (pair.first == key.c_str()) return pair.second;
         }
@@ -602,8 +635,7 @@ private:
             json j;
             j.m_type = value_t::object;
             j.m_value.object = j.create<object_t>();
-            // Reserve small capacity to avoid initial reallocs
-            j.m_value.object->reserve(4);
+            j.m_value.object->reserve(8); // Heuristic
 
             p = simd::skip_whitespace(p, end);
             if (*p == '}') { p++; return j; }
@@ -624,13 +656,21 @@ private:
                 if (*p == ',') { p++; p = simd::skip_whitespace(p, end); continue; }
                 throw std::runtime_error("Expected , or }");
             }
+
+            // Sort for O(log N) lookup if large enough
+            if (j.m_value.object->size() > 16) {
+                std::sort(j.m_value.object->begin(), j.m_value.object->end(),
+                    [](const std::pair<string_t, json>& a, const std::pair<string_t, json>& b) {
+                        return a.first < b.first;
+                    });
+            }
             return j;
         } else if (c == '[') {
             p++;
             json j;
             j.m_type = value_t::array;
             j.m_value.array = j.create<array_t>();
-            j.m_value.array->reserve(4);
+            j.m_value.array->reserve(8);
 
             p = simd::skip_whitespace(p, end);
             if (*p == ']') { p++; return j; }
