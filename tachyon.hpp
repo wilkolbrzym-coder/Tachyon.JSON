@@ -109,9 +109,19 @@ struct TachyonString {
     const char* ptr;
     uint32_t len;
 
+#if __cplusplus >= 201703L
+    operator std::string_view() const { return std::string_view(ptr, len); }
+#endif
+
     std::string to_std() const { return std::string(ptr, len); }
     bool operator==(const char* rhs) const { return strncmp(ptr, rhs, len) == 0 && rhs[len] == 0; }
     bool operator==(const std::string& rhs) const { return len == rhs.size() && memcmp(ptr, rhs.data(), len) == 0; }
+
+    // For sorting
+    bool operator<(const TachyonString& rhs) const {
+        int cmp = memcmp(ptr, rhs.ptr, std::min(len, rhs.len));
+        return cmp < 0 || (cmp == 0 && len < rhs.len);
+    }
 };
 
 struct TachyonObject {
@@ -210,6 +220,7 @@ public:
     template<typename T> T get() const;
 
     operator int() const { return (int)m_value.number_integer; }
+    operator int64_t() const { return m_value.number_integer; }
     operator double() const { return m_value.number_float; }
     operator bool() const { return m_value.boolean; }
     operator std::string() const { return m_value.string.to_std(); }
@@ -265,10 +276,35 @@ inline json& json::operator[](const char* key) {
     if (m_type != value_t::object) throw std::runtime_error("Not object");
 
     TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.entries;
-    for(size_t i=0; i<m_value.object.len; ++i) {
-        if (entries[i].key == key) return entries[i].val_;
+
+    // Small Object Optimization & Lazy Sorting
+    if (m_value.object.len >= 16) {
+        if (!m_value.object.sorted) {
+            std::sort(entries, entries + m_value.object.len,
+                [](const TachyonObjectEntry& a, const TachyonObjectEntry& b) {
+                    return a.key < b.key;
+                });
+            m_value.object.sorted = true;
+        }
+
+        TachyonString target_key = {key, (uint32_t)strlen(key)};
+        TachyonObjectEntry* it = std::lower_bound(entries, entries + m_value.object.len, target_key,
+            [](const TachyonObjectEntry& entry, const TachyonString& k) {
+                return entry.key < k;
+            });
+
+        if (it != entries + m_value.object.len && it->key == key) {
+            return it->val_;
+        }
+    } else {
+        // Linear Scan
+        for(size_t i=0; i<m_value.object.len; ++i) {
+            if (entries[i].key == key) return entries[i].val_;
+        }
     }
 
+    // Insert new
+    m_value.object.sorted = false;
     size_t new_len = m_value.object.len + 1;
     TachyonObjectEntry* new_entries = (TachyonObjectEntry*)PagedArena::tls_instance().allocate(new_len * sizeof(TachyonObjectEntry));
     if (m_value.object.len > 0) std::memcpy(new_entries, entries, m_value.object.len * sizeof(TachyonObjectEntry));
@@ -289,8 +325,20 @@ inline json& json::operator[](const char* key) {
 inline const json& json::operator[](const char* key) const {
     if (m_type != value_t::object) throw std::runtime_error("Not object");
     TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.entries;
-    for(size_t i=0; i<m_value.object.len; ++i) {
-        if (entries[i].key == key) return entries[i].val_;
+
+    if (m_value.object.len >= 16 && m_value.object.sorted) {
+        TachyonString target_key = {key, (uint32_t)strlen(key)};
+        auto it = std::lower_bound(entries, entries + m_value.object.len, target_key,
+            [](const TachyonObjectEntry& entry, const TachyonString& k) {
+                return entry.key < k;
+            });
+        if (it != entries + m_value.object.len && it->key == key) {
+            return it->val_;
+        }
+    } else {
+        for(size_t i=0; i<m_value.object.len; ++i) {
+            if (entries[i].key == key) return entries[i].val_;
+        }
     }
     throw std::out_of_range("Key not found");
 }
@@ -429,40 +477,92 @@ TACHYON_FORCE_INLINE const char* scan_string(const char* curr, const char* end) 
     return curr;
 }
 
-TACHYON_FORCE_INLINE json parse_number(const char*& curr) {
+TACHYON_FORCE_INLINE json parse_number(const char*& curr, const char* end) {
     const char* start = curr;
     bool neg = false;
-    if (*curr == '-') { neg=true; curr++; }
+    if (curr < end && *curr == '-') { neg=true; curr++; }
 
-    bool floating = false;
-    while(true) {
-        char c = *curr;
-        if (c >= '0' && c <= '9') { curr++; continue; }
-        if (c == '.' || c == 'e' || c == 'E') { floating=true; curr++; continue; }
-        if (c == '+' || c == '-') { curr++; continue; }
+    // Scan integer part first (manual loop for speed)
+    uint64_t v = 0;
+    while (curr < end) {
+        char c1 = *curr;
+        if (c1 < '0' || c1 > '9') break;
+
+        if (curr + 1 < end) {
+            char c2 = *(curr+1);
+            if (c2 >= '0' && c2 <= '9') {
+                v = v * 100 + (c1 - '0') * 10 + (c2 - '0');
+                curr += 2;
+                continue;
+            }
+        }
+
+        v = v * 10 + (c1 - '0');
+        curr++;
         break;
     }
 
-    if (floating) {
+    // Check for float
+    if (curr < end && (*curr == '.' || *curr == 'e' || *curr == 'E')) {
+         // Scan end of float
+         const char* p = curr;
+         while(p < end) {
+             char c = *p;
+             if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') { p++; }
+             else break;
+         }
+
+         // Fast Path Float
+         bool simple = true;
+         double frac = 0.0;
+         double div = 1.0;
+         const char* fscan = curr;
+
+         if (fscan < end && *fscan == '.') {
+             fscan++;
+             while (fscan < p) {
+                 if (*fscan >= '0' && *fscan <= '9') {
+                     frac = frac * 10.0 + (*fscan - '0');
+                     div *= 10.0;
+                     fscan++;
+                 } else if (*fscan == 'e' || *fscan == 'E') {
+                     simple = false; break;
+                 } else {
+                     break;
+                 }
+             }
+         } else {
+             simple = false;
+         }
+
+         if (simple && div > 1.0) {
+             double d = (double)v + (frac / div);
+             if (neg) d = -d;
+             curr = p;
+             return json(d);
+         }
+
+         // Fallback
 #if __cplusplus >= 201703L
-        double d;
-        std::from_chars(start, curr, d);
-        return json(d);
+         double d;
+         std::from_chars(start, p, d);
+         curr = p;
+         return json(d);
 #else
-        return json(std::strtod(start, nullptr));
+         char buf[64];
+         size_t len = p - start;
+         if (len < 63) {
+             memcpy(buf, start, len); buf[len] = 0;
+             curr = p;
+             return json(std::strtod(buf, nullptr));
+         }
+         curr = p;
+         return json(0.0);
 #endif
-    } else {
-        uint64_t v = 0;
-#if __cplusplus >= 201703L
-        std::from_chars(start, curr, v);
-#else
-        const char* p = start;
-        if (neg) p++;
-        while(p < curr) { v = v*10 + (*p - '0'); p++; }
-#endif
-        if (neg) return json(-(int64_t)v);
-        return json(v);
     }
+
+    if (neg) return json(-(int64_t)v);
+    return json(v);
 }
 
 inline json parse(const char* ptr, size_t len) {
@@ -484,10 +584,24 @@ inline json parse(const char* ptr, size_t len) {
     } else {
         if (c == '"') {
             curr++; const char* s=curr; curr=scan_string(curr, end);
-            TachyonString ts={s, (uint32_t)(curr-s)}; if (*curr=='\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; } curr++;
+                if (curr < end && *curr == '\\') {
+                    // Fallback for escapes
+                    while (curr < end) {
+                        if (*curr == '"') {
+                            // Check backslashes
+                            const char* b = curr - 1;
+                            int bcount = 0;
+                            while (b >= s && *b == '\\') { bcount++; b--; }
+                            if (bcount % 2 == 0) break; // Even backslashes -> quote is unescaped
+                        }
+                        curr++;
+                    }
+                }
+                TachyonString ts={s, (uint32_t)(curr-s)};
+                if (curr < end) curr++; // Skip closing quote
             return json(std::string(ts.ptr, ts.len));
         }
-        return parse_number(curr);
+            return parse_number(curr, end);
     }
 
     while (!call_stack.empty()) {
@@ -538,12 +652,23 @@ inline json parse(const char* ptr, size_t len) {
                 json val;
                 if (c == '"') {
                     curr++; const char* s=curr; curr=scan_string(curr, end);
-                    if (*curr == '\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; }
-                    val.set_string(s, curr-s); curr++;
+                    if (curr < end && *curr == '\\') {
+                        while (curr < end) {
+                            if (*curr == '"') {
+                                const char* b = curr - 1;
+                                int bcount = 0;
+                                while (b >= s && *b == '\\') { bcount++; b--; }
+                                if (bcount % 2 == 0) break;
+                            }
+                            curr++;
+                        }
+                    }
+                    val.set_string(s, curr-s);
+                    if (curr < end) curr++;
                 } else if (c == 't') { curr+=4; val=json(true); }
                 else if (c == 'f') { curr+=5; val=json(false); }
                 else if (c == 'n') { curr+=4; val=json(nullptr); }
-                else { val = parse_number(curr); }
+                else { val = parse_number(curr, end); }
 
                 array_stack.push_back(val);
 
@@ -582,9 +707,20 @@ inline json parse(const char* ptr, size_t len) {
 
             if (*curr != '"') throw std::runtime_error("Key exp");
             curr++; const char* s=curr; curr=scan_string(curr, end);
+
+            if (curr < end && *curr == '\\') {
+                while (curr < end) {
+                    if (*curr == '"') {
+                        const char* b = curr - 1;
+                        int bcount = 0;
+                        while (b >= s && *b == '\\') { bcount++; b--; }
+                        if (bcount % 2 == 0) break;
+                    }
+                    curr++;
+                }
+            }
             TachyonString key = {s, (uint32_t)(curr-s)};
-            if (*curr == '\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; key.len=curr-s; }
-            curr++;
+            if (curr < end) curr++;
 
             while (curr < end && (unsigned char)*curr <= 32) curr++;
             if (*curr != ':') throw std::runtime_error("Col");
@@ -608,12 +744,23 @@ inline json parse(const char* ptr, size_t len) {
                 json val;
                 if (c == '"') {
                     curr++; const char* vs=curr; curr=scan_string(curr, end);
-                    if (*curr == '\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; }
-                    val.set_string(vs, curr-vs); curr++;
+                    if (curr < end && *curr == '\\') {
+                        while (curr < end) {
+                            if (*curr == '"') {
+                                const char* b = curr - 1;
+                                int bcount = 0;
+                                while (b >= vs && *b == '\\') { bcount++; b--; }
+                                if (bcount % 2 == 0) break;
+                            }
+                            curr++;
+                        }
+                    }
+                    val.set_string(vs, curr-vs);
+                    if (curr < end) curr++;
                 } else if (c == 't') { curr+=4; val=json(true); }
                 else if (c == 'f') { curr+=5; val=json(false); }
                 else if (c == 'n') { curr+=4; val=json(nullptr); }
-                else { val = parse_number(curr); }
+                else { val = parse_number(curr, end); }
 
                 object_stack.back().val_ = val;
 
