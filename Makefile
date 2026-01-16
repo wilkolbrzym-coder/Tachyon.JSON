@@ -2,12 +2,12 @@ CXX = g++
 CXXFLAGS = -std=c++23 -O3 -march=native -flto -I. -Iglaze/include
 LDFLAGS =
 
-TARGET = bench_scientific
+TARGET = benchmark_runner
 TEST_TARGET = tests/unit_tests
 
 all: deps $(TARGET) $(TEST_TARGET)
 
-$(TARGET): bench_scientific.cpp simdjson.o
+$(TARGET): benchmark_runner.cpp simdjson.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 test: $(TEST_TARGET)
