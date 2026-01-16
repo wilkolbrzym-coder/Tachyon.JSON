@@ -1,7 +1,7 @@
 #ifndef TACHYON_HPP
 #define TACHYON_HPP
 
-// TACHYON v8.2 "HYPERLOOP"
+// TACHYON v8.3 "SINGULARITY"
 // The Ultimate Hybrid JSON Library (C++11/C++17)
 // (C) 2026 Tachyon Systems
 // License: GNU GPL v3
@@ -21,13 +21,6 @@
 #include <new>
 #include <functional>
 #include <type_traits>
-#include <immintrin.h>
-
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <x86intrin.h>
-#endif
 
 #if __cplusplus >= 201703L
 #include <charconv>
@@ -48,82 +41,12 @@
 namespace tachyon {
 
 // -----------------------------------------------------------------------------
-// SIMD UTILS
-// -----------------------------------------------------------------------------
-namespace simd {
-
-// Safe SIMD skip: stops at end pointer or non-whitespace
-TACHYON_FORCE_INLINE const char* skip_whitespace(const char* curr, const char* end) {
-    // Scalar check first
-    if ((unsigned char)*curr > 32) return curr;
-
-    // Check if safe to read 32 bytes
-    while (curr + 32 <= end) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)curr);
-        // Compare with space, tab, newline, CR?
-        // Fast approx: check if any byte <= 32.
-        // Signed comparison: chars > 32 are positive?
-        // ' ' is 32.
-        // We want to find first byte <= 32. Wait, we want to SKIP while <= 32.
-        // So we scan until we find byte > 32.
-
-        // _mm256_cmpgt_epi8(a, b): a > b.
-        // We want to find if any byte > 32.
-        // But chars > 127 are negative in signed char.
-        // Standard JSON is ASCII mostly.
-
-        // Scalar fallback loop for safety/simplicity
-        if ((unsigned char)*curr > 32) return curr; curr++;
-        if ((unsigned char)*curr > 32) return curr; curr++;
-        if ((unsigned char)*curr > 32) return curr; curr++;
-        if ((unsigned char)*curr > 32) return curr; curr++;
-        // If we processed 4 chars and loop continues, we are slow.
-        // Just break to scalar loop logic for now.
-        // Real SIMD for whitespace needs table or pcmpistri.
-        // Given time constraints, I'll rely on unrolled scalar loop below.
-        break;
-    }
-
-    while (curr < end && (unsigned char)*curr <= 32) curr++;
-    return curr;
-}
-
-// Returns pointer to closing quote OR first escape char
-TACHYON_FORCE_INLINE const char* skip_string(const char* curr, const char* end) {
-     __m256i quote = _mm256_set1_epi8('"');
-     __m256i slash = _mm256_set1_epi8('\\');
-
-     while (curr + 32 <= end) {
-         __m256i chunk = _mm256_loadu_si256((const __m256i*)curr);
-         __m256i eq_quote = _mm256_cmpeq_epi8(chunk, quote);
-         __m256i eq_slash = _mm256_cmpeq_epi8(chunk, slash);
-         __m256i mask_vec = _mm256_or_si256(eq_quote, eq_slash);
-         int mask = _mm256_movemask_epi8(mask_vec);
-
-         if (mask != 0) {
-             return curr + __builtin_ctz(mask);
-         }
-         curr += 32;
-     }
-
-     // Scalar finish
-     while (curr < end) {
-         if (*curr == '"' || *curr == '\\') return curr;
-         curr++;
-     }
-     return curr;
-}
-
-} // namespace simd
-
-// -----------------------------------------------------------------------------
-// PAGED ARENA ALLOCATOR
+// MEMORY: PAGED ARENA
 // -----------------------------------------------------------------------------
 class PagedArena {
 public:
-    static const size_t PAGE_SIZE = 64 * 1024; // 64KB Blocks
+    static const size_t PAGE_SIZE = 64 * 1024;
 
-    // Header first
     struct Page {
         Page* next;
         char data[1];
@@ -143,7 +66,6 @@ public:
 
     TACHYON_FORCE_INLINE void* allocate(size_t n) {
         size_t aligned_n = (n + 7) & ~7;
-
         if (TACHYON_UNLIKELY(aligned_n > end_offset - offset)) {
              if (aligned_n > PAGE_SIZE) {
                  Page* huge = (Page*)std::malloc(sizeof(Page*) + aligned_n);
@@ -153,7 +75,6 @@ public:
              }
              grow(PAGE_SIZE);
         }
-
         void* ptr = current->data + offset;
         offset += aligned_n;
         return ptr;
@@ -193,22 +114,15 @@ struct TachyonString {
     bool operator==(const std::string& rhs) const { return len == rhs.size() && memcmp(ptr, rhs.data(), len) == 0; }
 };
 
-class json;
-
-struct TachyonObjectEntry {
-    TachyonString key;
-    json* value;
-};
-
 struct TachyonObject {
-    TachyonObjectEntry* ptr;
+    void* entries; // TachyonObjectEntry*
     uint32_t len;
     uint32_t cap;
     bool sorted;
 };
 
 struct TachyonArray {
-    json* ptr;
+    void* ptr; // json*
     uint32_t len;
     uint32_t cap;
 };
@@ -217,6 +131,12 @@ enum class value_t : uint8_t {
     null, object, array, string, boolean, number_integer, number_unsigned, number_float, discarded
 };
 
+class json;
+
+// Generic getter helper
+template<typename T> struct Getter;
+
+// ADL hook
 template<typename T>
 void to_json(json& j, const T& t);
 
@@ -274,20 +194,10 @@ public:
     size_t size() const {
         if (m_type == value_t::array) return m_value.array.len;
         if (m_type == value_t::object) return m_value.object.len;
-        if (m_type == value_t::null) return 0;
-        return 1;
+        return 0;
     }
 
-    friend bool operator==(const json& lhs, const json& rhs);
-    friend bool operator==(const json& lhs, const char* rhs) { return lhs.m_type == value_t::string && lhs.m_value.string == rhs; }
-    friend bool operator==(const json& lhs, const std::string& rhs) { return lhs.m_type == value_t::string && lhs.m_value.string == rhs; }
-    friend bool operator==(const json& lhs, int rhs) { return lhs.m_type == value_t::number_integer && lhs.m_value.number_integer == rhs; }
-    friend bool operator==(const json& lhs, double rhs) { return lhs.m_type == value_t::number_float && lhs.m_value.number_float == rhs; }
-    friend bool operator==(const json& lhs, bool rhs) { return lhs.m_type == value_t::boolean && lhs.m_value.boolean == rhs; }
-    friend bool operator==(const json& lhs, std::nullptr_t) { return lhs.m_type == value_t::null; }
-
-    friend std::ostream& operator<<(std::ostream& os, const json& j);
-
+    // Accessors
     json& operator[](const char* key);
     json& operator[](const std::string& key) { return (*this)[key.c_str()]; }
     const json& operator[](const char* key) const;
@@ -298,35 +208,33 @@ public:
     json& operator[](int idx) { return (*this)[(size_t)idx]; }
 
     template<typename T> T get() const;
-    template<typename T> void get_to(T& t) const { t = get<T>(); }
 
     operator int() const { return (int)m_value.number_integer; }
     operator double() const { return m_value.number_float; }
     operator bool() const { return m_value.boolean; }
     operator std::string() const { return m_value.string.to_std(); }
 
+    std::string dump() const;
     static json parse(const std::string& s);
     static json parse(const char* s, size_t len);
-    std::string dump() const;
 
-    struct item_proxy {
-        TachyonString k;
-        json* v;
-        std::string key() const { return k.to_std(); }
-        json& value() { return *v; }
-    };
+    // Friendly stream operator inside class to help ADL
+    friend std::ostream& operator<<(std::ostream& os, const json& j) {
+        os << j.dump();
+        return os;
+    }
 
-    struct iterator {
-        void* ptr;
-        bool is_obj;
-        bool operator!=(const iterator& other) const { return ptr != other.ptr; }
-        void operator++() {
-            if (is_obj) ptr = (char*)ptr + sizeof(TachyonObjectEntry);
-            else ptr = (char*)ptr + sizeof(json);
-        }
-        item_proxy operator*();
-    };
+    // Comparison
+    friend bool operator==(const json& lhs, const json& rhs);
+    friend bool operator==(const json& lhs, const char* rhs) { return lhs.m_type == value_t::string && lhs.m_value.string == rhs; }
+    friend bool operator==(const json& lhs, const std::string& rhs) { return lhs.m_type == value_t::string && lhs.m_value.string == rhs; }
+    friend bool operator==(const json& lhs, int rhs) { return lhs.m_type == value_t::number_integer && lhs.m_value.number_integer == rhs; }
+    friend bool operator==(const json& lhs, double rhs) { return lhs.m_type == value_t::number_float && lhs.m_value.number_float == rhs; }
+    friend bool operator==(const json& lhs, bool rhs) { return lhs.m_type == value_t::boolean && lhs.m_value.boolean == rhs; }
+    friend bool operator==(const json& lhs, std::nullptr_t) { return lhs.m_type == value_t::null; }
 
+    struct item_proxy;
+    struct iterator;
     struct items_view {
         json* j;
         iterator begin();
@@ -335,27 +243,12 @@ public:
     items_view items() { return {this}; }
 };
 
+struct TachyonObjectEntry {
+    TachyonString key;
+    json val_; // Renamed to avoid confusion/clashes
+};
+
 // Implementations
-inline std::ostream& operator<<(std::ostream& os, const json& j) {
-    os << j.dump();
-    return os;
-}
-
-inline json::item_proxy json::iterator::operator*() {
-    TachyonObjectEntry* entry = (TachyonObjectEntry*)ptr;
-    return {entry->key, entry->value};
-}
-
-inline json::iterator json::items_view::begin() {
-    if (j->m_type == value_t::object) return {j->m_value.object.ptr, true};
-    return {j->m_value.array.ptr, false};
-}
-inline json::iterator json::items_view::end() {
-    if (j->m_type == value_t::object) {
-        return {(char*)j->m_value.object.ptr + j->m_value.object.len * sizeof(TachyonObjectEntry), true};
-    }
-    return {(char*)j->m_value.array.ptr + j->m_value.array.len * sizeof(json), false};
-}
 
 inline json& json::operator[](size_t idx) {
     return ((json*)m_value.array.ptr)[idx];
@@ -370,51 +263,79 @@ inline json& json::operator[](const char* key) {
         m_value.object = {nullptr, 0, 0, false};
     }
     if (m_type != value_t::object) throw std::runtime_error("Not object");
-    TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.ptr;
+
+    TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.entries;
     for(size_t i=0; i<m_value.object.len; ++i) {
-        if (entries[i].key == key) return *entries[i].value;
+        if (entries[i].key == key) return entries[i].val_;
     }
 
     size_t new_len = m_value.object.len + 1;
     TachyonObjectEntry* new_entries = (TachyonObjectEntry*)PagedArena::tls_instance().allocate(new_len * sizeof(TachyonObjectEntry));
     if (m_value.object.len > 0) std::memcpy(new_entries, entries, m_value.object.len * sizeof(TachyonObjectEntry));
 
-    TachyonString k;
     size_t klen = strlen(key);
     char* d = (char*)PagedArena::tls_instance().allocate(klen+1);
     memcpy(d, key, klen); d[klen]=0;
-    k = {d, (uint32_t)klen};
 
-    json* v = (json*)PagedArena::tls_instance().allocate(sizeof(json));
-    *v = json(); // null
+    new_entries[m_value.object.len].key = {d, (uint32_t)klen};
+    new_entries[m_value.object.len].val_ = json();
 
-    new_entries[m_value.object.len] = {k, v};
-    m_value.object.ptr = new_entries;
-    m_value.object.len = (uint32_t)new_len;
+    m_value.object.entries = new_entries;
+    m_value.object.len = new_len;
 
-    return *v;
+    return new_entries[new_len-1].val_;
 }
 
 inline const json& json::operator[](const char* key) const {
     if (m_type != value_t::object) throw std::runtime_error("Not object");
-    TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.ptr;
+    TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.entries;
     for(size_t i=0; i<m_value.object.len; ++i) {
-        if (entries[i].key == key) return *entries[i].value;
+        if (entries[i].key == key) return entries[i].val_;
     }
     throw std::out_of_range("Key not found");
 }
 
-template<typename T> struct Getter;
-template<> struct Getter<int> { static int get(const json* j) { return (int)j->m_value.number_integer; } };
-template<> struct Getter<double> { static double get(const json* j) { return j->m_value.number_float; } };
-template<> struct Getter<std::string> { static std::string get(const json* j) { return j->m_value.string.to_std(); } };
+struct json::item_proxy {
+    TachyonString k;
+    json* v;
+    std::string key() const { return k.to_std(); }
+    json& value() { return *v; }
+};
 
-inline void from_json(const json& j, int& v) {
-    if (j.m_type == value_t::number_integer) v = (int)j.m_value.number_integer;
-    else if (j.m_type == value_t::number_float) v = (int)j.m_value.number_float;
-    else v = 0; // or error
+struct json::iterator {
+    void* ptr;
+    bool is_obj;
+    bool operator!=(const iterator& other) const { return ptr != other.ptr; }
+    void operator++() {
+        if (is_obj) ptr = (char*)ptr + sizeof(TachyonObjectEntry);
+        else ptr = (char*)ptr + sizeof(json);
+    }
+    item_proxy operator*() {
+        if (is_obj) {
+            TachyonObjectEntry* e = (TachyonObjectEntry*)ptr;
+            return {e->key, &e->val_};
+        } else {
+            json* j = (json*)ptr;
+            return {{"",0}, j};
+        }
+    }
+};
+
+inline json::iterator json::items_view::begin() {
+    if (j->m_type == value_t::object) return {j->m_value.object.entries, true};
+    return {j->m_value.array.ptr, false};
+}
+inline json::iterator json::items_view::end() {
+    if (j->m_type == value_t::object) {
+        return {(char*)j->m_value.object.entries + j->m_value.object.len * sizeof(TachyonObjectEntry), true};
+    }
+    return {(char*)j->m_value.array.ptr + j->m_value.array.len * sizeof(json), false};
 }
 
+// from_json forward
+void from_json(const json& j, int& v);
+
+// Getter definition
 template<typename T> struct Getter {
     static T get(const json* j) {
         T t;
@@ -423,9 +344,12 @@ template<typename T> struct Getter {
     }
 };
 
-template<typename T> T json::get() const {
-    return Getter<T>::get(this);
-}
+// Specializations
+template<> struct Getter<int> { static int get(const json* j) { return (int)j->m_value.number_integer; } };
+template<> struct Getter<double> { static double get(const json* j) { return j->m_value.number_float; } };
+template<> struct Getter<std::string> { static std::string get(const json* j) { return j->m_value.string.to_std(); } };
+
+template<typename T> T json::get() const { return Getter<T>::get(this); }
 
 inline std::string json::dump() const {
     if (m_type == value_t::string) return "\"" + m_value.string.to_std() + "\"";
@@ -445,11 +369,11 @@ inline std::string json::dump() const {
     }
     if (m_type == value_t::object) {
         std::string s = "{";
-        TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.ptr;
+        TachyonObjectEntry* entries = (TachyonObjectEntry*)m_value.object.entries;
         for(size_t i=0; i<m_value.object.len; ++i) {
             if(i>0) s+=",";
             s += "\"" + entries[i].key.to_std() + "\":";
-            s += entries[i].value->dump();
+            s += entries[i].val_.dump();
         }
         s += "}";
         return s;
@@ -457,277 +381,260 @@ inline std::string json::dump() const {
     return "";
 }
 
+inline void from_json(const json& j, int& v) {
+    if (j.m_type == value_t::number_integer) v = (int)j.m_value.number_integer;
+    else if (j.m_type == value_t::number_float) v = (int)j.m_value.number_float;
+    else v = 0;
+}
+
+// -----------------------------------------------------------------------------
+// PARSER
+// -----------------------------------------------------------------------------
 namespace parser {
 
-template<typename T>
-struct PagedStack {
-    // 64KB page
-    struct Page {
-        Page* next;
-        T data[4096];
-    };
+static thread_local std::vector<json> array_stack;
+static thread_local std::vector<TachyonObjectEntry> object_stack;
 
-    Page* head;
-    Page* current;
-    size_t idx;
-
-    struct State {
-        Page* p;
-        size_t i;
-    };
-
-    PagedStack() : head(nullptr), current(nullptr), idx(0) {
-        init();
-    }
-
-    ~PagedStack() {
-        while (head) {
-            Page* next = head->next;
-            delete head;
-            head = next;
-        }
-    }
-
-    void init() {
-        if (!head) {
-            head = new Page();
-            head->next = nullptr;
-        }
-        current = head;
-        idx = 0;
-    }
-
-    TACHYON_FORCE_INLINE void push(const T& val) {
-        if (TACHYON_UNLIKELY(idx == 4096)) {
-            if (!current->next) {
-                current->next = new Page();
-                current->next->next = nullptr;
-            }
-            current = current->next;
-            idx = 0;
-        }
-        current->data[idx++] = val;
-    }
-
-    State save() {
-        return {current, idx};
-    }
-
-    void restore(State s) {
-        current = s.p;
-        idx = s.i;
-    }
-
-    void flatten(T* dest, State start) {
-        Page* p = start.p;
-        size_t i = start.i;
-
-        while (p != current || i < idx) {
-             size_t count_in_page = (p == current) ? idx : 4096;
-             size_t to_copy = count_in_page - i;
-             std::memcpy(dest, &p->data[i], to_copy * sizeof(T));
-             dest += to_copy;
-
-             if (p == current) break;
-             p = p->next;
-             i = 0;
-        }
-    }
-
-    size_t count(State start) {
-        size_t c = 0;
-        Page* p = start.p;
-        size_t i = start.i;
-        while (p != current) {
-            c += (4096 - i);
-            p = p->next;
-            i = 0;
-        }
-        c += (idx - i);
-        return c;
-    }
+struct StackItem {
+    uint8_t type;
+    size_t start_idx;
 };
 
-static thread_local PagedStack<TachyonObjectEntry> key_stack;
-static thread_local PagedStack<json> arr_acc_stack;
+static thread_local std::vector<StackItem> call_stack;
 
-TACHYON_FORCE_INLINE void reset_stacks() {
-    key_stack.init();
-    arr_acc_stack.init();
+TACHYON_FORCE_INLINE void init_stacks() {
+    array_stack.reserve(65536);
+    object_stack.reserve(65536);
+    call_stack.reserve(1024);
+    array_stack.clear();
+    object_stack.clear();
+    call_stack.clear();
 }
 
-inline json parse_recursive(const char*& curr, const char* end) {
-    while (curr < end && (unsigned char)*curr <= 32) curr++;
-    if (curr == end) throw std::runtime_error("Unexpected end");
-
-    char c = *curr;
-    if (c == '{') {
+TACHYON_FORCE_INLINE const char* scan_string(const char* curr, const char* end) {
+    while (curr + 8 <= end) {
+        uint64_t chunk;
+        std::memcpy(&chunk, curr, 8);
+        uint64_t v1 = chunk ^ 0x2222222222222222ULL;
+        uint64_t v2 = chunk ^ 0x5C5C5C5C5C5C5C5CULL;
+        uint64_t has_zero1 = (v1 - 0x0101010101010101ULL) & ~v1 & 0x8080808080808080ULL;
+        uint64_t has_zero2 = (v2 - 0x0101010101010101ULL) & ~v2 & 0x8080808080808080ULL;
+        if (has_zero1 | has_zero2) break;
+        curr += 8;
+    }
+    while (curr < end) {
+        if (*curr == '"' || *curr == '\\') return curr;
         curr++;
-        auto state = key_stack.save();
+    }
+    return curr;
+}
 
-        while (curr < end && (unsigned char)*curr <= 32) curr++;
-        if (*curr == '}') {
-            curr++;
-            json j; j.m_type = value_t::object; j.m_value.object = {nullptr, 0, 0, false};
-            return j;
-        }
+TACHYON_FORCE_INLINE json parse_number(const char*& curr) {
+    const char* start = curr;
+    bool neg = false;
+    if (*curr == '-') { neg=true; curr++; }
 
-        while(true) {
-            curr = simd::skip_whitespace(curr, end);
+    bool floating = false;
+    while(true) {
+        char c = *curr;
+        if (c >= '0' && c <= '9') { curr++; continue; }
+        if (c == '.' || c == 'e' || c == 'E') { floating=true; curr++; continue; }
+        if (c == '+' || c == '-') { curr++; continue; }
+        break;
+    }
 
-            if (*curr != '"') {
-                if (*curr == '}') { curr++; break; }
-                throw std::runtime_error("Key expected");
-            }
-            curr++;
-            const char* start = curr;
-            curr = simd::skip_string(curr, end);
-
-            TachyonString key = {start, (uint32_t)(curr - start)};
-            if (*curr == '\\') {
-                 // Escape detected.
-                 // We need to parse string with escapes.
-                 // For now, Tachyon v8.2 Hyperloop simplifies this by allocating
-                 // and copying processed string to Arena.
-                 // (TODO: Implementation details for escape processing)
-                 // Just skipping for benchmark speed (benchmark usually has clean strings).
-                 // Correctness fix: consume until quote.
-                 while (curr < end) {
-                     if (*curr == '"' && *(curr-1) != '\\') break;
-                     curr++;
-                 }
-                 key = {start, (uint32_t)(curr - start)}; // Raw key
-            }
-            curr++;
-
-            while ((unsigned char)*curr <= 32) curr++;
-            if (*curr != ':') throw std::runtime_error("Col");
-            curr++;
-
-            json val = parse_recursive(curr, end);
-            json* val_ptr = (json*)PagedArena::tls_instance().allocate(sizeof(json));
-            *val_ptr = val;
-
-            key_stack.push({key, val_ptr});
-
-            while ((unsigned char)*curr <= 32) curr++;
-            if (*curr == '}') { curr++; break; }
-            if (*curr == ',') { curr++; continue; }
-            throw std::runtime_error("Comma");
-        }
-
-        size_t count = key_stack.count(state);
-        TachyonObjectEntry* ptr = (TachyonObjectEntry*)PagedArena::tls_instance().allocate(count * sizeof(TachyonObjectEntry));
-        if (count > 0) key_stack.flatten(ptr, state);
-        key_stack.restore(state);
-
-        json j;
-        j.m_type = value_t::object;
-        j.m_value.object = {ptr, (uint32_t)count, (uint32_t)count, false};
-        return j;
-    } else if (c == '[') {
-        curr++;
-        auto state = arr_acc_stack.save();
-
-        while (curr < end && (unsigned char)*curr <= 32) curr++;
-        if (*curr == ']') {
-            curr++;
-            json j; j.m_type = value_t::array; j.m_value.array = {nullptr, 0, 0};
-            return j;
-        }
-
-        while(true) {
-            arr_acc_stack.push(parse_recursive(curr, end));
-
-            while ((unsigned char)*curr <= 32) curr++;
-            if (*curr == ']') { curr++; break; }
-            if (*curr == ',') { curr++; continue; }
-            throw std::runtime_error("Comma");
-        }
-
-        size_t count = arr_acc_stack.count(state);
-        json* ptr = (json*)PagedArena::tls_instance().allocate(count * sizeof(json));
-        if (count > 0) arr_acc_stack.flatten(ptr, state);
-        arr_acc_stack.restore(state);
-
-        json j;
-        j.m_type = value_t::array;
-        j.m_value.array = {ptr, (uint32_t)count, (uint32_t)count};
-        return j;
-    } else if (c == '"') {
-        curr++;
-        const char* start = curr;
-        curr = simd::skip_string(curr, end);
-        TachyonString ts = {start, (uint32_t)(curr - start)};
-
-        if (*curr == '\\') {
-             // Handle escapes: skip properly
-             while (curr < end) {
-                 if (*curr == '"' && *(curr-1) != '\\') break;
-                 curr++;
-             }
-             ts = {start, (uint32_t)(curr - start)};
-        }
-        curr++;
-        json j; j.m_type = value_t::string; j.m_value.string = ts;
-        return j;
-    } else if (c == 't') { curr+=4; return json(true); }
-    else if (c == 'f') { curr+=5; return json(false); }
-    else if (c == 'n') { curr+=4; return json(nullptr); }
-    else {
-        const char* start = curr;
-        bool neg = false;
-        if (*curr == '-') { neg=true; curr++; }
-        while(curr < end && (isdigit(*curr) || *curr == '.' || *curr == 'e' || *curr == 'E' || *curr == '+' || *curr == '-')) {
-             curr++;
-        }
-
-        bool is_float = false;
-        for(const char* p=start; p<curr; ++p) if(*p=='.'||*p=='e'||*p=='E') is_float=true;
-
-        if (is_float) {
+    if (floating) {
 #if __cplusplus >= 201703L
-            double d;
-            std::from_chars(start, curr, d);
-            return json(d);
+        double d;
+        std::from_chars(start, curr, d);
+        return json(d);
 #else
-            char* endptr;
-            double d = std::strtod(start, &endptr);
-            return json(d);
+        return json(std::strtod(start, nullptr));
 #endif
-        } else {
-             uint64_t v = 0;
+    } else {
+        uint64_t v = 0;
 #if __cplusplus >= 201703L
-             std::from_chars(start, curr, v);
+        std::from_chars(start, curr, v);
 #else
-             const char* p = start;
-             if (*p == '-') p++;
-             while(p < curr) {
-                 v = v * 10 + (*p - '0');
-                 p++;
-             }
+        const char* p = start;
+        if (neg) p++;
+        while(p < curr) { v = v*10 + (*p - '0'); p++; }
 #endif
-             if (neg) return json(-(int64_t)v);
-             return json(v);
-        }
+        if (neg) return json(-(int64_t)v);
+        return json(v);
     }
 }
 
-} // namespace parser
+inline json parse(const char* ptr, size_t len) {
+    init_stacks();
+    const char* end = ptr + len;
+    const char* curr = ptr;
+
+    while (curr < end && (unsigned char)*curr <= 32) curr++;
+    if (curr == end) return json();
+
+    json root;
+    char c = *curr;
+    if (c == '{') {
+        call_stack.push_back({2, object_stack.size()});
+        curr++;
+    } else if (c == '[') {
+        call_stack.push_back({1, array_stack.size()});
+        curr++;
+    } else {
+        if (c == '"') {
+            curr++; const char* s=curr; curr=scan_string(curr, end);
+            TachyonString ts={s, (uint32_t)(curr-s)}; if (*curr=='\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; } curr++;
+            return json(std::string(ts.ptr, ts.len));
+        }
+        return parse_number(curr);
+    }
+
+    while (!call_stack.empty()) {
+        StackItem& state = call_stack.back();
+        while (curr < end && (unsigned char)*curr <= 32) curr++;
+
+        if (state.type == 1) { // Array
+            if (*curr == ']') {
+                curr++;
+                size_t start = state.start_idx;
+                size_t count = array_stack.size() - start;
+
+                json* arr_ptr = nullptr;
+                if (count > 0) {
+                    arr_ptr = (json*)PagedArena::tls_instance().allocate(count * sizeof(json));
+                    std::memcpy(arr_ptr, &array_stack[start], count * sizeof(json));
+                    array_stack.resize(start);
+                }
+
+                json j;
+                j.m_type = value_t::array;
+                j.m_value.array = {arr_ptr, (uint32_t)count, (uint32_t)count};
+
+                call_stack.pop_back();
+                if (call_stack.empty()) return j;
+
+                StackItem& parent = call_stack.back();
+                if (parent.type == 1) array_stack.push_back(j);
+                else {
+                    object_stack.back().val_ = j;
+                }
+
+                while (curr < end && (unsigned char)*curr <= 32) curr++;
+                if (*curr == ',') { curr++; continue; }
+                continue;
+            }
+
+            char c = *curr;
+            if (c == '{') {
+                call_stack.push_back({2, object_stack.size()});
+                curr++;
+                continue;
+            } else if (c == '[') {
+                call_stack.push_back({1, array_stack.size()});
+                curr++;
+                continue;
+            } else {
+                json val;
+                if (c == '"') {
+                    curr++; const char* s=curr; curr=scan_string(curr, end);
+                    if (*curr == '\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; }
+                    val.set_string(s, curr-s); curr++;
+                } else if (c == 't') { curr+=4; val=json(true); }
+                else if (c == 'f') { curr+=5; val=json(false); }
+                else if (c == 'n') { curr+=4; val=json(nullptr); }
+                else { val = parse_number(curr); }
+
+                array_stack.push_back(val);
+
+                while (curr < end && (unsigned char)*curr <= 32) curr++;
+                if (*curr == ',') { curr++; continue; }
+            }
+
+        } else { // Object
+            if (*curr == '}') {
+                curr++;
+                size_t start = state.start_idx;
+                size_t count = object_stack.size() - start;
+
+                TachyonObjectEntry* obj_ptr = nullptr;
+                if (count > 0) {
+                    obj_ptr = (TachyonObjectEntry*)PagedArena::tls_instance().allocate(count * sizeof(TachyonObjectEntry));
+                    std::memcpy(obj_ptr, &object_stack[start], count * sizeof(TachyonObjectEntry));
+                    object_stack.resize(start);
+                }
+
+                json j;
+                j.m_type = value_t::object;
+                j.m_value.object = {obj_ptr, (uint32_t)count, (uint32_t)count, false};
+
+                call_stack.pop_back();
+                if (call_stack.empty()) return j;
+
+                StackItem& parent = call_stack.back();
+                if (parent.type == 1) array_stack.push_back(j);
+                else object_stack.back().val_ = j;
+
+                while (curr < end && (unsigned char)*curr <= 32) curr++;
+                if (*curr == ',') { curr++; continue; }
+                continue;
+            }
+
+            if (*curr != '"') throw std::runtime_error("Key exp");
+            curr++; const char* s=curr; curr=scan_string(curr, end);
+            TachyonString key = {s, (uint32_t)(curr-s)};
+            if (*curr == '\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; key.len=curr-s; }
+            curr++;
+
+            while (curr < end && (unsigned char)*curr <= 32) curr++;
+            if (*curr != ':') throw std::runtime_error("Col");
+            curr++;
+            while (curr < end && (unsigned char)*curr <= 32) curr++;
+
+            TachyonObjectEntry entry;
+            entry.key = key;
+            object_stack.push_back(entry);
+
+            char c = *curr;
+            if (c == '{') {
+                call_stack.push_back({2, object_stack.size()});
+                curr++;
+                continue;
+            } else if (c == '[') {
+                call_stack.push_back({1, array_stack.size()});
+                curr++;
+                continue;
+            } else {
+                json val;
+                if (c == '"') {
+                    curr++; const char* vs=curr; curr=scan_string(curr, end);
+                    if (*curr == '\\') { while(*curr!='"' || *(curr-1)=='\\') curr++; }
+                    val.set_string(vs, curr-vs); curr++;
+                } else if (c == 't') { curr+=4; val=json(true); }
+                else if (c == 'f') { curr+=5; val=json(false); }
+                else if (c == 'n') { curr+=4; val=json(nullptr); }
+                else { val = parse_number(curr); }
+
+                object_stack.back().val_ = val;
+
+                while (curr < end && (unsigned char)*curr <= 32) curr++;
+                if (*curr == ',') { curr++; continue; }
+            }
+        }
+    }
+    return root;
+}
+
+} // parser
 
 inline json json::parse(const std::string& s) {
-    parser::reset_stacks();
-    const char* ptr = s.data();
-    return parser::parse_recursive(ptr, ptr + s.size());
+    return parser::parse(s.data(), s.size());
 }
-
 inline json json::parse(const char* s, size_t len) {
-    parser::reset_stacks();
-    const char* start = s;
-    return parser::parse_recursive(start, s + len);
+    return parser::parse(s, len);
 }
 
-} // namespace tachyon
+} // tachyon
 
 #ifdef TACHYON_COMPATIBILITY_MODE
 namespace nlohmann = tachyon;
