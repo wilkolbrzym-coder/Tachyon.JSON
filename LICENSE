@@ -1,38 +1,21 @@
-# Business Source License 1.1 (BSL)
+MIT License
 
-**Software:** Tachyon JSON Library v0.7.2  
-**Licensor:** Tachyon Systems (by WilkOlbrzym-Coder)  
-**Change License:** MIT License  
-**Change Date:** January 1, 2030  
+Copyright (c) 2026 Tachyon Systems
 
-### 1. LICENSE GRANT
-The Licensor hereby grants you the right to copy, modify, create derivative works, redistribute, and use the Software subject to the conditions below.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-### 2. ADDITIONAL USE GRANT (FREE TIER)
-You may use the Software for any purpose, including production use, free of charge, provided that your **Annual Gross Revenue is less than $1,000,000 USD**. Attribution to the author is required.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-### 3. COMMERCIAL USE LIMITATIONS
-If your Annual Gross Revenue exceeds **$1,000,000 USD**, your use of the Software is limited to non-production use only (testing and development). Production use for entities above $1M revenue requires a separate commercial agreement. Suggested tiers:
-*   **$1M - $5M Revenue:** One-time perpetual license ($2,499 USD).
-*   **Over $5M Revenue:** Annual subscription models.
-
-### 4. CORE PROTECTION
-Users are strictly prohibited from extracting the SIMD structural kernels or the "Safe Depth Skip" logic for use in other libraries or projects. Reverse engineering of the core structural bitmask generation is forbidden.
-
-### 5. BEST EFFORT BUG-FIX POLICY
-The Licensor aims for the highest code quality and provides the following support policy:
-*   **Target Response:** If a critical bug (crash or incorrect result) is reported and reproduced, the Licensor will use reasonable efforts to provide a fix or workaround, typically within **14 business days**.
-*   **No Guarantee:** If a specific bug cannot be resolved within this timeframe or at all, the Licensor **assumes no responsibility or liability**. The attempt to fix is a courtesy, not a legal obligation.
-
-### 6. NO WARRANTY AND LIMITATION OF LIABILITY
-EXCEPT FOR THE POLICY IN SECTION 5, THE SOFTWARE IS PROVIDED **"AS IS"**, WITHOUT WARRANTY OF ANY KIND. 
-IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF THE SOFTWARE. 
-If the Software fails to perform or causes damages, the Licensor is not responsible for any financial or data loss.
-
-### 7. CHANGE TO OPEN SOURCE
-On the **Change Date (January 1, 2030)**, this license will automatically expire, and the Software will be permanently licensed under the **MIT License**.
-
-***
-**Author:** WilkOlbrzym-Coder  
-**Brand:** Tachyon Systems
-***
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
