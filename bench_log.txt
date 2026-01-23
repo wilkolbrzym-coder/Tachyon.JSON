@@ -1,0 +1,8 @@
+Benchmarking...
+
+--- Small File (600B) Latency ---
+Simdjson: 187.096 ns/op
+Tachyon:  1031.43 ns/op
+
+--- Large File (256MB) Throughput ---
+Simdjson: 960.761 MB/s
