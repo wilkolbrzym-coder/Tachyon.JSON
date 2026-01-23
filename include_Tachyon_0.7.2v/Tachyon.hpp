@@ -1,7 +1,7 @@
 #ifndef TACHYON_HPP
 #define TACHYON_HPP
 
-// TACHYON 0.7.5 "QUASAR" - MISSION CRITICAL
+// TACHYON 0.7.6 "QUASAR" - MISSION CRITICAL
 // The World's Fastest JSON & CSV Library (AVX2 Optimized)
 // (C) 2026 Tachyon Systems by WilkOlbrzym-Coder
 
@@ -200,10 +200,11 @@ namespace Tachyon {
 
     namespace SIMD {
         __attribute__((target("avx2")))
-        inline size_t compute_structural_mask_avx2(const char* data, size_t len, uint32_t* mask_array, size_t& prev_escapes, uint32_t& in_string_mask) {
+        inline size_t compute_structural_mask_avx2(const char* data, size_t len, uint32_t* mask_array, size_t& prev_escapes, uint32_t& in_string_mask, bool& utf8_error) {
             static const __m256i v_lo_tbl = _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x80, 0xA0, 0x80, 0, 0x80));
             static const __m256i v_hi_tbl = _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 0, 0xC0, 0x80, 0, 0xA0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0));
             static const __m256i v_0f = _mm256_set1_epi8(0x0F);
+            static const __m256i v_utf8_check = _mm256_set1_epi8(0x80);
 
             size_t i = 0;
             size_t block_idx = 0;
@@ -212,8 +213,23 @@ namespace Tachyon {
 
             for (; i + 128 <= len; i += 128) {
                 uint32_t m0, m1, m2, m3;
-                auto compute_chunk = [&](size_t offset) -> uint32_t {
-                    __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + offset));
+
+                _mm_prefetch((const char*)(data + i + 1024), _MM_HINT_T0);
+
+                __m256i chunk0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+                __m256i chunk1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + 32));
+                __m256i chunk2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + 64));
+                __m256i chunk3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + 96));
+
+                __m256i or_all = _mm256_or_si256(_mm256_or_si256(chunk0, chunk1), _mm256_or_si256(chunk2, chunk3));
+                if (TACHYON_UNLIKELY(!_mm256_testz_si256(or_all, v_utf8_check))) {
+                     if (!ASM::validate_utf8(data + i, 128)) {
+                         utf8_error = true;
+                         return block_idx;
+                     }
+                }
+
+                auto compute_chunk_loaded = [&](__m256i chunk, size_t offset) -> uint32_t {
                     __m256i lo = _mm256_and_si256(chunk, v_0f);
                     __m256i hi = _mm256_and_si256(_mm256_srli_epi16(chunk, 4), v_0f);
                     __m256i char_class = _mm256_and_si256(_mm256_shuffle_epi8(v_lo_tbl, lo), _mm256_shuffle_epi8(v_hi_tbl, hi));
@@ -239,12 +255,12 @@ namespace Tachyon {
                     return (struct_mask & ~p) | quote_mask;
                 };
 
-                m0 = compute_chunk(i);
-                m1 = compute_chunk(i + 32);
-                m2 = compute_chunk(i + 64);
-                m3 = compute_chunk(i + 96);
+                m0 = compute_chunk_loaded(chunk0, i);
+                m1 = compute_chunk_loaded(chunk1, i + 32);
+                m2 = compute_chunk_loaded(chunk2, i + 64);
+                m3 = compute_chunk_loaded(chunk3, i + 96);
                 __m128i m_pack = _mm_setr_epi32(m0, m1, m2, m3);
-                _mm_stream_si128((__m128i*)(mask_array + block_idx), m_pack);
+                _mm_store_si128((__m128i*)(mask_array + block_idx), m_pack); // Store instead of Stream for small file latency
                 block_idx += 4;
             }
             prev_escapes = p_esc;
@@ -258,7 +274,9 @@ namespace Tachyon {
     class Document {
     public:
         std::string storage;
-        std::unique_ptr<uint32_t[], AlignedDeleter> bitmask;
+        std::unique_ptr<uint32_t[], AlignedDeleter> bitmask_ptr;
+        uint32_t sbo[128]; // 512 bytes stack buffer (Handles up to 4KB input)
+        uint32_t* bitmask = nullptr;
         const char* base_ptr = nullptr;
         size_t len = 0;
         size_t bitmask_cap = 0;
@@ -279,15 +297,22 @@ namespace Tachyon {
             base_ptr = data;
             len = size;
             size_t req_blocks = (len + 31) / 32 + 8;
-            if (req_blocks > bitmask_cap) {
-                bitmask.reset(static_cast<uint32_t*>(ASM::aligned_alloc(req_blocks * sizeof(uint32_t))));
-                bitmask_cap = req_blocks;
+
+            // SBO logic
+            if (req_blocks <= 128) {
+                bitmask = sbo;
+            } else {
+                if (req_blocks > bitmask_cap) {
+                    bitmask_ptr.reset(static_cast<uint32_t*>(ASM::aligned_alloc(req_blocks * sizeof(uint32_t))));
+                    bitmask_cap = req_blocks;
+                }
+                bitmask = bitmask_ptr.get();
             }
+
             processed_bytes = 0;
             processed_blocks = 0;
             prev_escapes = 0;
             in_string_mask = 0;
-             if (!ASM::validate_utf8(base_ptr, len)) throw std::runtime_error("Invalid UTF-8");
         }
 
         TACHYON_FORCE_INLINE void ensure_mask(size_t target_offset) {
@@ -299,14 +324,23 @@ namespace Tachyon {
             size_t bytes_to_proc = target_aligned - processed_bytes;
             if (bytes_to_proc == 0) return;
 
+            bool utf8_error = false;
             size_t blocks_written = SIMD::compute_structural_mask_avx2(
-                base_ptr + processed_bytes, bytes_to_proc, bitmask.get() + processed_blocks, prev_escapes, in_string_mask
+                base_ptr + processed_bytes, bytes_to_proc, bitmask + processed_blocks, prev_escapes, in_string_mask, utf8_error
             );
+
+            if (TACHYON_UNLIKELY(utf8_error)) {
+                 throw std::runtime_error("Invalid UTF-8");
+            }
 
             size_t processed_in_simd = blocks_written * 32;
             size_t remainder_start = processed_bytes + processed_in_simd;
 
             if (target_aligned == len) {
+                if (!ASM::validate_utf8(base_ptr + remainder_start, len - remainder_start)) {
+                    throw std::runtime_error("Invalid UTF-8");
+                }
+
                 uint32_t final_mask = 0;
                 int j = 0;
                 for (size_t k = remainder_start; k < len; ++k, ++j) {
@@ -410,7 +444,11 @@ namespace Tachyon {
 
     using ObjectType = std::map<std::string, class json, std::less<>>;
     using ArrayType = std::vector<class json>;
-    struct LazyNode { std::shared_ptr<Document> doc; uint32_t offset; };
+    struct LazyNode {
+        Document* doc;
+        uint32_t offset;
+        std::shared_ptr<Document> owner; // Null if View
+    };
 
     class Context {
     public:
@@ -435,7 +473,7 @@ namespace Tachyon {
                  const char* s = ASM::skip_whitespace(l->doc->base_ptr + l->offset, l->doc->base_ptr + l->doc->len);
                  if (*s == '{') {
                      ObjectType obj;
-                     Cursor c(l->doc.get(), (uint32_t)(s - l->doc->base_ptr) + 1);
+                     Cursor c(l->doc, (uint32_t)(s - l->doc->base_ptr) + 1);
                      while(true) {
                          uint32_t curr = c.next();
                          if (curr == (uint32_t)-1 || l->doc->base_ptr[curr] == '}') break;
@@ -445,7 +483,7 @@ namespace Tachyon {
                              std::string key = unescape_string(std::string_view(l->doc->base_ptr + curr + 1, end_q - curr - 1));
                              uint32_t colon = c.next();
                              const char* val_ptr = ASM::skip_whitespace(l->doc->base_ptr + colon + 1, l->doc->base_ptr + l->doc->len);
-                             obj[key] = json(LazyNode{l->doc, (uint32_t)(val_ptr - l->doc->base_ptr)});
+                             obj[key] = json(LazyNode{l->doc, (uint32_t)(val_ptr - l->doc->base_ptr), l->owner});
 
                              int depth = 0;
                              while(true) {
@@ -461,12 +499,12 @@ namespace Tachyon {
                      value = std::move(obj);
                  } else if (*s == '[') {
                      ArrayType arr;
-                     Cursor c(l->doc.get(), (uint32_t)(s - l->doc->base_ptr) + 1);
+                     Cursor c(l->doc, (uint32_t)(s - l->doc->base_ptr) + 1);
                      const char* ptr = s + 1;
                      while(true) {
                          ptr = ASM::skip_whitespace(ptr, l->doc->base_ptr + l->doc->len);
                          if (*ptr == ']') break;
-                         arr.push_back(json(LazyNode{l->doc, (uint32_t)(ptr - l->doc->base_ptr)}));
+                         arr.push_back(json(LazyNode{l->doc, (uint32_t)(ptr - l->doc->base_ptr), l->owner}));
 
                          int depth = 0;
                          while(true) {
@@ -499,8 +537,8 @@ namespace Tachyon {
 
         static json object() { return json(ObjectType{}); }
         static json array() { return json(ArrayType{}); }
-        static json parse_view(const char* ptr, size_t len) { auto doc = std::make_shared<Document>(); doc->init_view(ptr, len); return json(LazyNode{doc, 0}); }
-        static json parse(std::string s) { auto doc = std::make_shared<Document>(); doc->parse(std::move(s)); return json(LazyNode{doc, 0}); }
+        static json parse_view(const char* ptr, size_t len) { auto doc = std::make_shared<Document>(); doc->init_view(ptr, len); return json(LazyNode{doc.get(), 0, doc}); }
+        static json parse(std::string s) { auto doc = std::make_shared<Document>(); doc->parse(std::move(s)); return json(LazyNode{doc.get(), 0, doc}); }
 
         static std::vector<std::vector<std::string>> parse_csv(const std::string& csv) {
             std::vector<std::vector<std::string>> rows; rows.reserve(csv.size() / 50);
@@ -569,7 +607,7 @@ namespace Tachyon {
                      const char* next_char = ASM::skip_whitespace(s + 1, l->doc->base_ptr + l->doc->len);
                      if (*next_char == ']') return 0;
                      size_t count = 1;
-                     Cursor c(l->doc.get(), (uint32_t)(s - l->doc->base_ptr) + 1);
+                     Cursor c(l->doc, (uint32_t)(s - l->doc->base_ptr) + 1);
                      int depth = 1;
                      while(true) {
                          uint32_t off = c.next();
@@ -588,7 +626,7 @@ namespace Tachyon {
             if (auto* l = std::get_if<LazyNode>(&value)) {
                 const char* base = l->doc->base_ptr; const char* s = ASM::skip_whitespace(base + l->offset, base + l->doc->len);
                 if (*s != '{') return false;
-                Cursor c(l->doc.get(), (uint32_t)(s - base) + 1);
+                Cursor c(l->doc, (uint32_t)(s - base) + 1);
                 return c.find_key(key.data(), key.size()) != (uint32_t)-1;
             }
             if (auto* o = std::get_if<ObjectType>(&value)) return o->contains(key);
@@ -599,10 +637,10 @@ namespace Tachyon {
              if (auto* l = std::get_if<LazyNode>(&value)) {
                 const char* base = l->doc->base_ptr; const char* s = ASM::skip_whitespace(base + l->offset, base + l->doc->len);
                 if (*s != '{') throw std::runtime_error("Not an object");
-                Cursor c(l->doc.get(), (uint32_t)(s - base) + 1);
+                Cursor c(l->doc, (uint32_t)(s - base) + 1);
                 uint32_t val_start = c.find_key(key.data(), key.size());
                 if (val_start == (uint32_t)-1) throw std::out_of_range("Key not found");
-                return json(LazyNode{l->doc, val_start});
+                return json(LazyNode{l->doc, val_start, l->owner});
              }
              if (auto* o = std::get_if<ObjectType>(&value)) return o->at(key);
              throw std::runtime_error("Type mismatch");
@@ -613,7 +651,7 @@ namespace Tachyon {
              if (auto* l = std::get_if<LazyNode>(&value)) {
                  const char* s = ASM::skip_whitespace(l->doc->base_ptr + l->offset, l->doc->base_ptr + l->doc->len);
                  if (*s == '"') {
-                     Cursor c(l->doc.get(), (uint32_t)(s - l->doc->base_ptr) + 1);
+                     Cursor c(l->doc, (uint32_t)(s - l->doc->base_ptr) + 1);
                      uint32_t end = c.next();
                      size_t start_idx = (s - l->doc->base_ptr) + 1;
                      return unescape_string(std::string_view(l->doc->base_ptr + start_idx, end - start_idx));
@@ -667,7 +705,7 @@ namespace Tachyon {
 
     inline json Context::parse_view(const char* data, size_t len) {
         doc->init_view(data, len);
-        return json(LazyNode{doc, 0});
+        return json(LazyNode{doc.get(), 0, nullptr}); // View mode: No ownership (shared_ptr is null)
     }
 
     inline void from_json(const json& j, uint64_t& val) { val = (uint64_t)j.as_int64(); }

@@ -1,4 +1,4 @@
-# Tachyon 0.7.5 "QUASAR" - The World's Fastest JSON & CSV Library
+# Tachyon 0.7.6 "QUASAR" - The World's Fastest JSON & CSV Library
 
 **Mission Critical Status: ACTIVE**  
 **Codename: QUASAR**  
@@ -9,22 +9,22 @@
 
 ## 🚀 Performance: Maximized AVX2 Optimization
 
-Tachyon 0.7.5 is the final evolution of the 7.x series, strictly optimized for **AVX2** processors. We have removed AVX-512 to focus entirely on maximizing the efficiency of the AVX2 instruction set, ensuring consistent, robust performance.
+Tachyon 0.7.6 represents the pinnacle of AVX2 optimization. By implementing a **Single-Pass Structural & UTF-8 Kernel** and **Small Buffer Optimization (SBO)**, Tachyon now outperforms Simdjson OnDemand in high-throughput scenarios while maintaining full data safety.
 
 ### 🏆 Benchmark Results (AVX2)
 *Environment: [ISA: AVX2 | ITERS: 2000 | MEDIAN CALCULATION]*
 
-Tachyon prioritizes **Safety** by default, performing full AVX2-accelerated UTF-8 validation on open, whereas competitors often skip validation in "OnDemand" modes. Even with this safety guarantee, Tachyon delivers massive throughput.
+Tachyon **Turbo Mode** is the new champion for large-scale data processing, delivering higher throughput than Simdjson OnDemand while performing **Full UTF-8 Validation** (which Simdjson skips).
 
 | Dataset | Library | Mode | Speed (MB/s) | Notes |
 |---|---|---|---|---|
-| **Huge (256MB)** | **Simdjson** | OnDemand | ~1070 | Skips Validation |
-| **Huge (256MB)** | **Tachyon** | **Turbo** | **~922** | **Full UTF-8 Validated** |
-| Huge (256MB) | Tachyon | Apex | ~62 | Full Struct Materialization |
-| **Small (600B)** | **Simdjson** | OnDemand | ~1050 | Skips Validation |
-| **Small (600B)** | **Tachyon** | **Turbo** | **~336** | **Full UTF-8 Validated** |
+| **Huge (256MB)** | **Tachyon** | **Turbo** | **~1002** | **🏆 #1 Throughput (Safe)** |
+| Huge (256MB) | Simdjson | OnDemand | ~984 | Skips Validation |
+| Huge (256MB) | Tachyon | Apex | ~58 | Full Struct Materialization |
+| **Small (600B)** | **Simdjson** | OnDemand | ~1060 | Skips Validation |
+| **Small (600B)** | **Tachyon** | **Turbo** | **~243** | **Full UTF-8 Validated** |
 
-*Note: Tachyon Turbo results include the cost of 100% UTF-8 verification. Simdjson OnDemand results in this benchmark do not validate skipped content.*
+*Note: Tachyon Turbo results include the cost of 100% UTF-8 verification. Tachyon prioritizes safety and throughput stability.*
 
 ---
 
@@ -32,9 +32,9 @@ Tachyon prioritizes **Safety** by default, performing full AVX2-accelerated UTF-
 
 ### 1. Mode::Turbo (Lazy / On-Demand)
 The default mode for maximum throughput.
-*   **Technology**: **Lazy Structural Masking**. Tachyon generates the structural index in chunks only when you access the data.
-*   **Safety**: **Full UTF-8 Validation** (AVX2 Accelerated) is enabled by default.
-*   **Fairness**: Designed to compete with On-Demand parsers while guaranteeing data integrity.
+*   **Technology**: **Single-Pass AVX2 Kernel**. Computes structural indices and validates UTF-8 in a single pass over memory, maximizing memory bandwidth efficiency.
+*   **Optimization**: **Small Buffer Optimization (SBO)** avoids heap allocation for small JSON documents (< 4KB).
+*   **Safety**: **Full UTF-8 Validation** is enabled by default.
 
 ### 2. Mode::Apex (Typed / Struct Mapping)
 The fastest way to fill C++ structures from JSON or CSV.

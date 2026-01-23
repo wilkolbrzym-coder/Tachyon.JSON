@@ -84,7 +84,11 @@ void test_utf8_validation() {
     std::string invalid = "{\"key\": \"\xFF\"}";
     bool caught = false;
     try {
-        Tachyon::json::parse(invalid);
+        auto doc = Tachyon::json::parse(invalid);
+        // Force access to trigger lazy validation
+        if (doc.contains("key")) {
+             doc["key"].as_string();
+        }
     } catch (const std::exception& e) {
         caught = true;
     }
