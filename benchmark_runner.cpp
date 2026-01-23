@@ -1,6 +1,6 @@
 #include "Tachyon.hpp"
 #include "simdjson.h"
-#include <glaze/glaze.hpp>
+// #include <glaze/glaze.hpp> // Glaze missing in env
 #include <chrono>
 #include <iostream>
 #include <vector>
@@ -26,7 +26,8 @@ struct HugeEntry {
 // Tachyon Reflection
 TACHYON_DEFINE_TYPE_NON_INTRUSIVE(HugeEntry, id, name, active, scores, description)
 
-// Glaze Reflection
+// Glaze Reflection (Disabled due to missing lib)
+/*
 template<>
 struct glz::meta<HugeEntry> {
     using T = HugeEntry;
@@ -38,6 +39,7 @@ struct glz::meta<HugeEntry> {
         "description", &T::description
     );
 };
+*/
 
 // -----------------------------------------------------------------------------
 // UTILS
@@ -112,8 +114,9 @@ int main() {
     std::cout << std::fixed << std::setprecision(12);
 
     for (const auto& job : jobs) {
-        const int iters = 2000;
-        const int warmup = 100;
+        int iters = 2000;
+        int warmup = 100;
+        if (job.size > 1024 * 1024) { iters = 50; warmup = 10; } // Reduce for Huge
 
         std::cout << "\n>>> Dataset: " << job.name << " (" << job.size << " bytes)" << std::endl;
         std::cout << "| Library | Mode | Speed (MB/s) | Median Time (s) |" << std::endl;
@@ -247,7 +250,8 @@ int main() {
                       << " | " << std::setprecision(6) << s.median_time << " |" << std::endl;
         }
 
-        // --- 4. GLAZE (TYPED) ---
+        // --- 4. GLAZE (TYPED) - DISABLED ---
+        /*
         if (job.typed && job.name.find("Huge") != std::string::npos) {
             std::vector<double> times;
             times.reserve(iters);
@@ -270,6 +274,7 @@ int main() {
             std::cout << "| Glaze | Typed | " << std::setw(12) << std::setprecision(2) << s.mb_s
                       << " | " << std::setprecision(6) << s.median_time << " |" << std::endl;
         }
+        */
     }
     return 0;
 }
