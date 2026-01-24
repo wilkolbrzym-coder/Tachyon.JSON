@@ -109,6 +109,25 @@ void test_large_lazy() {
     TEST_ASSERT(doc.size() == 1000);
 }
 
+void test_canada() {
+    FILE* f = fopen("canada.json", "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::string s; s.resize(sz);
+    fread(&s[0], 1, sz, f);
+    fclose(f);
+
+    Tachyon::Context ctx;
+    auto doc = ctx.parse_view(s.data(), s.size());
+    // Just ensure it doesn't crash
+    if (doc.contains("type")) {
+        std::string type = doc["type"].as_string();
+        TEST_ASSERT(type == "FeatureCollection");
+    }
+}
+
 int main() {
     std::cout << "Running Tachyon Tests..." << std::endl;
     test_json_basic();
@@ -123,6 +142,8 @@ int main() {
     std::cout << "UTF-8 Validation Passed" << std::endl;
     test_large_lazy();
     std::cout << "Large Lazy Passed" << std::endl;
+    test_canada();
+    std::cout << "Canada Passed" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;
     return 0;
 }

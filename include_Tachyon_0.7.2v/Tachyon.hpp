@@ -260,7 +260,7 @@ namespace Tachyon {
                 m2 = compute_chunk_loaded(chunk2, i + 64);
                 m3 = compute_chunk_loaded(chunk3, i + 96);
                 __m128i m_pack = _mm_setr_epi32(m0, m1, m2, m3);
-                _mm_store_si128((__m128i*)(mask_array + block_idx), m_pack); // Store instead of Stream for small file latency
+                _mm_stream_si128((__m128i*)(mask_array + block_idx), m_pack); // Restore Stream for Throughput
                 block_idx += 4;
             }
             prev_escapes = p_esc;
@@ -275,7 +275,7 @@ namespace Tachyon {
     public:
         std::string storage;
         std::unique_ptr<uint32_t[], AlignedDeleter> bitmask_ptr;
-        uint32_t sbo[128]; // 512 bytes stack buffer (Handles up to 4KB input)
+        alignas(32) uint32_t sbo[128]; // 512 bytes stack buffer (Handles up to 4KB input)
         uint32_t* bitmask = nullptr;
         const char* base_ptr = nullptr;
         size_t len = 0;
