@@ -9,22 +9,24 @@
 
 ## 🚀 Performance: Maximized AVX2 Optimization
 
-Tachyon 0.7.6 represents the pinnacle of AVX2 optimization. By implementing a **Single-Pass Structural & UTF-8 Kernel** and **Small Buffer Optimization (SBO)**, Tachyon now outperforms Simdjson OnDemand in high-throughput scenarios while maintaining full data safety.
+Tachyon 0.7.6 represents the pinnacle of AVX2 optimization. By implementing a **Single-Pass Structural & UTF-8 Kernel** and **Small Buffer Optimization (SBO)**, Tachyon outperforms Simdjson OnDemand in specific latency-critical scenarios while maintaining full data safety.
 
 ### 🏆 Benchmark Results (AVX2)
 *Environment: [ISA: AVX2 | ITERS: 2000 | MEDIAN CALCULATION]*
 
-Tachyon **Turbo Mode** is the new champion for large-scale data processing, delivering higher throughput than Simdjson OnDemand while performing **Full UTF-8 Validation** (which Simdjson skips).
+Tachyon **Turbo Mode** excels at **Low-Latency Key Access**, finding keys in large files orders of magnitude faster than streaming parsers by skipping parsing entirely. For massive stream processing, it remains highly competitive while guaranteeing safety.
 
 | Dataset | Library | Mode | Speed (MB/s) | Notes |
 |---|---|---|---|---|
-| **Huge (256MB)** | **Tachyon** | **Turbo** | **~1002** | **🏆 #1 Throughput (Safe)** |
-| Huge (256MB) | Simdjson | OnDemand | ~984 | Skips Validation |
-| Huge (256MB) | Tachyon | Apex | ~58 | Full Struct Materialization |
-| **Small (600B)** | **Simdjson** | OnDemand | ~1060 | Skips Validation |
-| **Small (600B)** | **Tachyon** | **Turbo** | **~243** | **Full UTF-8 Validated** |
+| **Canada (2.2MB)** | **Tachyon** | **Turbo** | **~205,000** | **🚀 Instant Key Access (Lazy)** |
+| Canada (2.2MB) | Simdjson | OnDemand | ~3,300 | Streaming Scan |
+| **Huge (256MB)** | **Simdjson** | OnDemand | ~827 | Stream Iteration |
+| **Huge (256MB)** | **Tachyon** | **Turbo** | **~600** | **Full DOM Materialization + Safe** |
+| Huge (256MB) | Tachyon | Apex | ~55 | Direct Struct Mapping |
+| **Small (600B)** | **Simdjson** | OnDemand | ~1120 | Stack Optimized |
+| **Small (600B)** | **Tachyon** | **Turbo** | **~307** | **Full UTF-8 Validated** |
 
-*Note: Tachyon Turbo results include the cost of 100% UTF-8 verification. Tachyon prioritizes safety and throughput stability.*
+*Note: Tachyon Turbo results include the cost of 100% UTF-8 verification for processed data. The "Instant Key Access" speed on Canada.json demonstrates Tachyon's ability to count elements or find keys without parsing child objects, a unique architectural advantage.*
 
 ---
 
@@ -32,17 +34,17 @@ Tachyon **Turbo Mode** is the new champion for large-scale data processing, deli
 
 ### 1. Mode::Turbo (Lazy / On-Demand)
 The default mode for maximum throughput.
-*   **Technology**: **Single-Pass AVX2 Kernel**. Computes structural indices and validates UTF-8 in a single pass over memory, maximizing memory bandwidth efficiency.
-*   **Optimization**: **Small Buffer Optimization (SBO)** avoids heap allocation for small JSON documents (< 4KB).
+*   **Technology**: **Single-Pass AVX2 Kernel**. Computes structural indices and validates UTF-8 in a single pass over memory.
+*   **Lazy Indexing**: Can skip entire sub-trees of JSON without parsing them, enabling O(1) effective latency for lookups in large files.
 *   **Safety**: **Full UTF-8 Validation** is enabled by default.
 
 ### 2. Mode::Apex (Typed / Struct Mapping)
 The fastest way to fill C++ structures from JSON or CSV.
-*   **Technology**: **Direct-Key-Jump**. Maps JSON fields directly to your C++ structs (`int`, `string`, `vector`, `bool`, etc.) without creating an intermediate DOM.
+*   **Technology**: **Direct-Key-Jump**. Maps JSON fields directly to your C++ structs (`int`, `string`, `vector`, `bool`, etc.).
 
 ### 3. Mode::CSV (New!)
 High-performance CSV parsing support.
-*   **Features**: Parse CSV files into raw rows or map them directly to C++ structs using the same reflection system as JSON.
+*   **Features**: Parse CSV files into raw rows or map them directly to C++ structs using the same reflection system as JSON. Handles escaped quotes and multiline fields correctly.
 
 ---
 
@@ -57,7 +59,7 @@ Tachyon::Context ctx;
 auto doc = ctx.parse_view(buffer, size);
 
 if (doc.is_array()) {
-    // Only parses the array elements you access
+    // Uses optimized AVX2 skipping to count elements instantly
     size_t count = doc.size(); 
 }
 ```

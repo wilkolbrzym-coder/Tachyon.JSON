@@ -116,7 +116,8 @@ int main() {
     for (const auto& job : jobs) {
         int iters = 2000;
         int warmup = 100;
-        if (job.size > 1024 * 1024) { iters = 50; warmup = 10; } // Reduce for Huge
+        if (job.size > 200 * 1024 * 1024) { iters = 10; warmup = 5; } // Huge
+        else if (job.size > 1024 * 1024) { iters = 100; warmup = 20; } // Canada
 
         std::cout << "\n>>> Dataset: " << job.name << " (" << job.size << " bytes)" << std::endl;
         std::cout << "| Library | Mode | Speed (MB/s) | Median Time (s) |" << std::endl;
