@@ -1,123 +1,113 @@
-# Tachyon 0.7.2 "QUASAR" - The World's Fastest JSON Library
+# Tachyon 0.7.6 "QUASAR" - The World's Fastest JSON & CSV Library
 
 **Mission Critical Status: ACTIVE**  
 **Codename: QUASAR**  
 **Author: WilkOlbrzym-Coder**  
-**License: Business Source License 1.1 (BSL)**
+**License: Commercial (v7.x) / GPLv3 (Future v8.x)**
 
 ---
 
-## 🚀 Performance: At the Edge of Physics
+## 🚀 Performance: Maximized AVX2 Optimization
 
-Tachyon 0.7.2 is not just a library; it is a weapon of mass optimization. Built with a "Dual-Engine" architecture targeting AVX2 and AVX-512, it pushes x86 hardware to its absolute physical limits.
+Tachyon 0.7.6 represents the pinnacle of AVX2 optimization. By implementing a **Single-Pass Structural & UTF-8 Kernel** and **Small Buffer Optimization (SBO)**, Tachyon outperforms Simdjson OnDemand in specific latency-critical scenarios while maintaining full data safety.
 
-### 🏆 Benchmark Results: AVX-512 ("God Mode")
-*Environment: [ISA: AVX-512 | ITERS: 50 | WARMUP: 20]*
+### 🏆 Benchmark Results (AVX2)
+*Environment: [ISA: AVX2 | ITERS: 2000 | MEDIAN CALCULATION]*
 
-At the throughput levels shown below, the margin of error is so minuscule that **Tachyon** and **Simdjson** are effectively tied for the world record. Depending on the CPU's thermal state and background noise, either library may win by a fraction of a percent.
+Tachyon **Turbo Mode** excels at **Low-Latency Key Access**, finding keys in large files orders of magnitude faster than streaming parsers by skipping parsing entirely. For massive stream processing, it remains highly competitive while guaranteeing safety.
 
-| Dataset | Library | Speed (MB/s) | Median Time (s) | Status |
+| Dataset | Library | Mode | Speed (MB/s) | Notes |
 |---|---|---|---|---|
-| **Canada.json** | **Tachyon (Turbo)** | **10,538.41** | 0.000203 | 👑 **JOINT WORLD RECORD** |
-| Canada.json | Simdjson (Fair) | 10,247.31 | 0.000209 | Extreme Parity |
-| Canada.json | Glaze (Reuse) | 617.48 | 0.003476 | Obsolete |
-| **Huge (256MB)** | **Simdjson (Fair)** | **2,574.96** | 0.099419 | 👑 **JOINT WORLD RECORD** |
-| Huge (256MB) | Tachyon (Turbo) | 2,545.57 | 0.100566 | Extreme Parity |
-| Huge (256MB) | Glaze (Reuse) | 379.94 | 0.673788 | Obsolete |
+| **Canada (2.2MB)** | **Tachyon** | **Turbo** | **~205,000** | **🚀 Instant Key Access (Lazy)** |
+| Canada (2.2MB) | Simdjson | OnDemand | ~3,300 | Streaming Scan |
+| **Huge (256MB)** | **Simdjson** | OnDemand | ~827 | Stream Iteration |
+| **Huge (256MB)** | **Tachyon** | **Turbo** | **~600** | **Full DOM Materialization + Safe** |
+| Huge (256MB) | Tachyon | Apex | ~55 | Direct Struct Mapping |
+| **Small (600B)** | **Simdjson** | OnDemand | ~1120 | Stack Optimized |
+| **Small (600B)** | **Tachyon** | **Turbo** | **~307** | **Full UTF-8 Validated** |
 
-### 🏆 Benchmark Results: AVX2 Baseline
-| Dataset | Library | Speed (MB/s) | Status |
-|---|---|---|---|
-| **Canada.json** | **Tachyon (Turbo)** | **6,174.24** | 🥇 **Dominant** |
-| Canada.json | Simdjson (Fair) | 3,312.34 | Defeated |
-| **Huge (256MB)** | **Tachyon (Turbo)** | **1,672.49** | 🥇 **Dominant** |
-| Huge (256MB) | Simdjson (Fair) | 1,096.11 | Defeated |
+*Note: Tachyon Turbo results include the cost of 100% UTF-8 verification for processed data. The "Instant Key Access" speed on Canada.json demonstrates Tachyon's ability to count elements or find keys without parsing child objects, a unique architectural advantage.*
 
 ---
 
-## 🏛️ The Four Pillars of Quasar
+## 🏛️ Modes of Operation
 
-### 1. Mode::Turbo (The Throughput King)
-Optimized for Big Data analysis where every nanosecond counts.
-*   **Technology**: **Vectorized Depth Skipping**. Tachyon identifies object boundaries using SIMD and "teleports" over nested content to find array elements at memory-bus speeds.
+### 1. Mode::Turbo (Lazy / On-Demand)
+The default mode for maximum throughput.
+*   **Technology**: **Single-Pass AVX2 Kernel**. Computes structural indices and validates UTF-8 in a single pass over memory.
+*   **Lazy Indexing**: Can skip entire sub-trees of JSON without parsing them, enabling O(1) effective latency for lookups in large files.
+*   **Safety**: **Full UTF-8 Validation** is enabled by default.
 
-### 2. Mode::Apex (The Typed Speedster)
-The fastest way to fill C++ structures from JSON.
-*   **Technology**: **Direct-Key-Jump**. Instead of building a DOM, Apex uses vectorized key searches to find fields and maps them directly to structs using zero-materialization logic.
+### 2. Mode::Apex (Typed / Struct Mapping)
+The fastest way to fill C++ structures from JSON or CSV.
+*   **Technology**: **Direct-Key-Jump**. Maps JSON fields directly to your C++ structs (`int`, `string`, `vector`, `bool`, etc.).
 
-### 3. Mode::Standard (The Balanced Warrior)
-Classic DOM-based access with maximum flexibility.
-*   **Features**: Full **JSONC** support (single-line and block comments) and materialized access to all fields.
-
-### 4. Mode::Titan (The Tank)
-Enterprise-grade safety for untrusted data.
-*   **Hardening**: Includes **AVX-512 UTF-8 validation** kernels and strict bounds checking to prevent crashes or exploits on malformed input.
+### 3. Mode::CSV (New!)
+High-performance CSV parsing support.
+*   **Features**: Parse CSV files into raw rows or map them directly to C++ structs using the same reflection system as JSON. Handles escaped quotes and multiline fields correctly.
 
 ---
 
 ## 🛠️ Usage Guide
 
-### Turbo Mode: Fast Analysis
-Best for counting elements or calculating statistics on huge buffers.
-
+### Turbo Mode: Lazy Analysis
 ```cpp
 #include "Tachyon.hpp"
 
 Tachyon::Context ctx;
-auto doc = ctx.parse_view(buffer, size); // Zero-copy view
+// Zero-copy view, validates UTF-8, parses structure on demand
+auto doc = ctx.parse_view(buffer, size);
 
 if (doc.is_array()) {
-    // Uses the "Safe Depth Skip" AVX path for record-breaking speed
+    // Uses optimized AVX2 skipping to count elements instantly
     size_t count = doc.size(); 
 }
 ```
 
-### Apex Mode: Direct Struct Mapping
-Skip the DOM entirely and extract data into your own types.
-
+### Apex Mode: Typed JSON
 ```cpp
 struct User {
-    int64_t id;
+    uint64_t id;
     std::string name;
+    std::vector<int> scores;
 };
 
-// Non-intrusive metadata
-TACHYON_DEFINE_TYPE_NON_INTRUSIVE(User, id, name)
+// Define reflection
+TACHYON_DEFINE_TYPE_NON_INTRUSIVE(User, id, name, scores)
 
 int main() {
-    Tachyon::json j = Tachyon::json::parse(json_string);
     User u;
-    j.get_to(u); // Apex Direct-Key-Jump fills the struct instantly
+    Tachyon::json::parse(json_string).get_to(u);
 }
+```
+
+### CSV Mode
+```cpp
+// Raw Rows
+auto rows = Tachyon::json::parse_csv(csv_string);
+
+// Typed Objects
+auto users = Tachyon::json::parse_csv_typed<User>(csv_string);
 ```
 
 ---
 
-## 🧠 Architecture: The Dual-Engine
-Tachyon detects your hardware at runtime and hot-swaps the parsing kernel.
-*   **AVX2 Engine**: 32-byte-per-cycle classification using `vpshufb` tables.
-*   **AVX-512 Engine**: 64-byte-per-cycle classification leveraging `k-mask` registers for branchless filtering.
+## 💰 Licensing & Support
+
+**Tachyon v7.x is a PAID COMMERCIAL PRODUCT.**
+
+To use Tachyon v7.x in your projects, you must purchase a license.
+
+*   **Commercial License ($100)**: [Buy on Ko-fi](https://ko-fi.com/wilkolbrzym)
+    *   *Proof of License: Keep your Ko-fi payment confirmation/email.*
+
+**Future Roadmap:**
+*   When **Tachyon v8.x** is released, **Tachyon v7.x** will become **Free (GPLv3)**.
+*   **Tachyon v8.x** will then be the paid commercial version.
+
+## 🛡️ How to Verify
+1.  Purchase the Commercial License if you are using v7.x.
+2.  Keep your payment receipt as proof of purchase.
 
 ---
-
-## 🛡️ Licensing & Support Policy
-
-**Business Source License 1.1 (BSL)**
-
-Tachyon is licensed under the BSL. It is "Source-Available" software that automatically converts to the **MIT License** on **January 1, 2030**.
-
-### Commercial Tiers:
-*   **Free (Tier 0)**: Annual Revenue < $1M USD. **FREE** for production use. Attribution required.
-*   **Paid (Tier 1-4)**: Annual Revenue > $1M USD. Requires a commercial agreement for production use.
-    *   $1M - $5M Revenue: $2,499 (One-time payment).
-    *   Over $5M Revenue: Annual subscription models.
-
-### Bug-Fix Policy:
-*   **Best Effort:** The Author provides a "Best Effort" bug-fix policy. If a reproducible critical bug is reported, the Author aims to provide a fix or workaround within **14 business days**.
-*   **No Liability:** If a bug cannot be resolved within this timeframe or at all, the Author **assumes no legal responsibility or liability**. 
-
-**PROHIBITION**: Unauthorized copying, modification, or extraction of the core SIMD structural kernels for use in other projects is strictly prohibited. The software is provided **"AS IS"** without any product warranty.
-
----
-
-*(C) 2026 Tachyon Systems. Engineered by WilkOlbrzym-Coder.*
+(C) 2026 Tachyon Systems.
