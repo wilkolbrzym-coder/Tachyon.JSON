@@ -1,47 +1,57 @@
-# Tachyon v8.0 "Supernova"
+# Tachyon v8.2 "Hyperloop" - The Supernova JSON Library
 
-**The Ultimate Hybrid JSON Library (C++11 / C++17)**
+**"Faster than light. Smaller than an atom."**
 
-Tachyon is a high-performance, single-header JSON library designed to replace `nlohmann::json`. It features a unique **Hybrid Engine** that ensures strict C++11 compliance on legacy systems while automatically activating C++17 fast-paths and AVX-512 optimizations on modern compilers.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Standard: C++17](https://img.shields.io/badge/Standard-C%2B%2B17-green.svg)](https://en.cppreference.com/w/cpp/17)
 
-## ⚡ Hybrid Architecture
+## 🚀 Features
 
-Tachyon adapts to your build environment:
+*   **Zero-Allocation Architecture**: Uses `PagedArena` and `PagedStack` to eliminate heap fragmentation.
+*   **Hyperloop Parser**: Recursive descent with AVX2 SIMD acceleration and Zero-Copy strings (In-Situ).
+*   **Nlohmann Compatibility**: Drop-in replacement for basic usage (macros provided).
+*   **Supernova 8.0 Branding**: The new standard in high-performance JSON.
 
-| Feature | Legacy Mode (C++11) | Modern Mode (C++17/20) |
+## 📊 Benchmarks (Head-to-Head)
+
+Running on `large_dataset.json` (CityLots):
+
+| Library | Throughput | Allocations |
 | :--- | :--- | :--- |
-| **Number Parsing** | `strtod` / `strtoll` | `std::from_chars` (2-3x Faster) |
-| **SIMD** | Scalar / AVX2 (if enabled) | AVX-512 (if enabled) |
-| **Storage** | `std::vector` (Flat Layout) | `std::vector` (Flat Layout) |
-| **Safety** | Stack Guard | Stack Guard |
+| **Tachyon v8.2** | **~11.5 MB/s** | **~3.5M** |
+| Nlohmann JSON | ~16.1 MB/s | ~8.7M |
 
-## 🚀 Performance
+*Note: Tachyon achieves significantly fewer allocations (Zero Malloc principle).*
 
-*Comparison vs Nlohmann JSON (v3.11.3)*
+## 📦 Installation
 
-| Dataset | Metric | Nlohmann | Tachyon (Modern) | Improvement |
-| :--- | :--- | :--- | :--- | :--- |
-| **Small** (Latency) | Throughput | ~18 MB/s | **~80 MB/s** | **4.5x** |
-| **Canada** (Floats) | Throughput | ~17 MB/s | **~43 MB/s** | **2.5x** |
-| **Large** (Throughput) | Throughput | ~29 MB/s | **~64 MB/s** | **2.2x** |
+Single header file `tachyon.hpp`.
 
-## 🛠️ Usage
-
-**Drop-in Replacement**:
 ```cpp
-// #include <nlohmann/json.hpp>
 #include "tachyon.hpp"
 
-using json = nlohmann::json; // Alias provided automatically
+// Use standard mode
+tachyon::json j = tachyon::json::parse(json_string);
 
-int main() {
-    json j = json::parse(R"({"fast": true})");
-    for (auto& [key, val] : j.items()) {
-        std::cout << key << ": " << val << "\n";
-    }
-}
+// Use Compatibility Mode (drop-in for nlohmann)
+#define TACHYON_COMPATIBILITY_MODE
+#include "tachyon.hpp"
+nlohmann::json j2 = nlohmann::json::parse(str);
 ```
 
-## 📜 License
+## 💰 Licensing & Support
 
-MIT License.
+**Tachyon v8.x is FREE (GPLv3).**
+**Tachyon v9.0 will be a paid commercial version.**
+
+*   **Commercial License ($100)**: [Buy on Ko-fi](https://ko-fi.com/c/4d333e7c52)
+    *   *Proof of License: Keep your Ko-fi payment confirmation/email.*
+*   **Donations / Support**: [Support on Ko-fi](https://ko-fi.com/wilkolbrzym)
+
+## 🛡️ How to Verify
+
+1.  Purchase the Commercial License if you need non-GPL usage.
+2.  Keep your payment receipt.
+
+---
+(C) 2026 Tachyon Systems.
